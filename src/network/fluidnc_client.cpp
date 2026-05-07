@@ -29,23 +29,13 @@ static bool uartAutoReportSent = false;
 static uint32_t uartAutoReportFallbackTime = 0;
 // Serial read buffer
 static char _serial_read_buf[1024];
-static size_t _serial_read_pos = 0;
-bool debugEnabled = true; // Set to true to enable debug prints in FluidNCClient  
+static size_t _serial_read_pos = 0;  
 
 void FluidNCClient::init() {
     if (initialized) return;
     
     Serial.println("[FluidNC] Initializing client");
     initialized = true;
-}
-
-void debugPrint(const char* fmt, ...) {
-    if (!debugEnabled) return;
-
-    va_list args;
-    va_start(args, fmt);
-    Serial.printf(fmt, args);
-    va_end(args);
 }
 
 bool FluidNCClient::connect(const MachineConfig &config) {
@@ -58,9 +48,7 @@ bool FluidNCClient::connect(const MachineConfig &config) {
     currentConfig = config;
     // If the machine is configured for UART, initialize UART transport and return
     if (config.connection_type == CONN_UART) {
-        debugEnabled = false;
-        debugPrint("[FluidNC] Connecting to machine via UART (port=%d, RX=%d, TX=%d, baud=%u)\n", 
-                      config.uart_port, config.uart_rx_pin, config.uart_tx_pin, (unsigned)config.uart_baud);
+        Serial.println("[FluidNC] Connecting to machine via UART");
 
         // Select UART instance
         if (config.uart_port == 0) uartSerial = &Serial0;
@@ -77,15 +65,11 @@ bool FluidNCClient::connect(const MachineConfig &config) {
             #ifndef HARDWARE_ADVANCE
             rx_pin = 18;  // Safe RX pin for Basic hardware
             tx_pin = 17;  // Safe TX pin for Basic hardware
-            debugPrint("[FluidNC] Using safe UART pins for Basic hardware (RX=18, TX=17)");
             #else
             // For Advance hardware, use different safe pins if needed
             rx_pin = 18;  // Safe RX pin for Advance hardware
             tx_pin = 17;  // Safe TX pin for Advance hardware
-            debugPrint("[FluidNC] Using safe UART pins for Advance hardware (RX=18, TX=17)");
             #endif
-        } else {
-            debugPrint("[FluidNC] Using custom UART pins (RX=%d, TX=%d)\n", rx_pin, tx_pin);
         }
         
         uartSerial->begin(config.uart_baud, SERIAL_8N1, rx_pin, tx_pin);
@@ -155,11 +139,11 @@ bool FluidNCClient::connect(const MachineConfig &config) {
     
     // Check WiFi connection first
     if (WiFi.status() != WL_CONNECTED) {
-        debugPrint("[FluidNC] Error: WiFi not connected");
+        Serial.println("[FluidNC] Error: WiFi not connected");
         return false;
     }
     
-    debugPrint("[FluidNC] Connecting to %s:%d via WebSocket\n", 
+    Serial.printf("[FluidNC] Connecting to %s:%d via WebSocket\n", 
                   config.fluidnc_url, config.websocket_port);
     
     // Resolve hostname if needed (mDNS support)
@@ -167,20 +151,20 @@ bool FluidNCClient::connect(const MachineConfig &config) {
     IPAddress serverIP;
     if (resolvedHost.indexOf('.') == -1 || resolvedHost.endsWith(".local")) {
         // It's a hostname or mDNS name, try to resolve it
-        debugPrint("[FluidNC] Resolving hostname: %s\n", resolvedHost.c_str());
+        Serial.printf("[FluidNC] Resolving hostname: %s\n", resolvedHost.c_str());
         
         // Try resolving with retries (mDNS can be slow to respond)
         bool resolved = false;
         for (int attempt = 0; attempt < 5 && !resolved; attempt++) {
             if (attempt > 0) {
-                debugPrint("[FluidNC] Retry attempt %d/5...\n", attempt + 1);
+                Serial.printf("[FluidNC] Retry attempt %d/5...\n", attempt + 1);
                 delay(1000);  // Longer delay between retries for mDNS
             }
             
             if (resolvedHost.endsWith(".local")) {
                 // Use MDNS.queryHost() for .local hostnames (strip the .local suffix)
                 String hostname = resolvedHost.substring(0, resolvedHost.length() - 6);
-                debugPrint("[FluidNC] Using mDNS query for: %s\n", hostname.c_str());
+                Serial.printf("[FluidNC] Using mDNS query for: %s\n", hostname.c_str());
                 serverIP = MDNS.queryHost(hostname);
             } else {
                 // Use standard DNS for non-.local hostnames
@@ -189,20 +173,20 @@ bool FluidNCClient::connect(const MachineConfig &config) {
             
             // Validate that we got a real IP address (not 0.0.0.0)
             if (serverIP != IPAddress(0, 0, 0, 0)) {
-                debugPrint("[FluidNC] Resolved on attempt %d to IP: %s\n", attempt + 1, serverIP.toString().c_str());
+                Serial.printf("[FluidNC] Resolved on attempt %d to IP: %s\n", attempt + 1, serverIP.toString().c_str());
                 resolved = true;
             } else {
-                debugPrint("[FluidNC] Attempt %d returned invalid IP (0.0.0.0)\n", attempt + 1);
+                Serial.printf("[FluidNC] Attempt %d returned invalid IP (0.0.0.0)\n", attempt + 1);
             }
         }
         
         if (!resolved) {
-            debugPrint("[FluidNC] Failed to resolve hostname: %s after 5 attempts\n", resolvedHost.c_str());
-            debugPrint("[FluidNC] Tip: Try using the IP address instead, or check that mDNS is working on your network");
+            Serial.printf("[FluidNC] Failed to resolve hostname: %s after 5 attempts\n", resolvedHost.c_str());
+            Serial.println("[FluidNC] Tip: Try using the IP address instead, or check that mDNS is working on your network");
             return false;
         }
         resolvedHost = serverIP.toString();
-        debugPrint("[FluidNC] Using resolved IP: %s\n", resolvedHost.c_str());
+        Serial.printf("[FluidNC] Using resolved IP: %s\n", resolvedHost.c_str());
     }
     
     // Set up event callbacks
@@ -227,11 +211,6 @@ bool FluidNCClient::connect(const MachineConfig &config) {
 }
 
 void FluidNCClient::disconnect() {
-    debugEnabled = true;
-    if(debugEnabled) {
-        debugPrint("[FluidNC] Debug: Disconnecting");
-    }
-
     if (usingSerial) {
         // For UART, just stop reading / end serial
         if (uartSerial) uartSerial->end();
@@ -432,11 +411,6 @@ void FluidNCClient::clearTerminalCallback() {
 void FluidNCClient::onMessageCallback(WebsocketsMessage message) {
     // Route to shared handler
     handleIncoming(message.c_str());
-}
-
-// Public test shim to allow harnesses to feed messages into the internal parser
-void FluidNCClient::test_handleIncoming(const char* message) {
-    handleIncoming(message);
 }
 
 void FluidNCClient::handleIncoming(const char* payload) {

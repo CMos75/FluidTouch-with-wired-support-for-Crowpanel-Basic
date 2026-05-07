@@ -93,6 +93,8 @@ public:
     // Initialize the client
     static void init();
     
+    static void reset();
+
     // Connect to FluidNC using machine config
     static bool connect(const MachineConfig &config);
     
@@ -136,9 +138,6 @@ public:
     
     // Clear terminal callback
     static void clearTerminalCallback();
-
-    // Testing helper: expose internal incoming handler for unit tests/harness
-    static void test_handleIncoming(const char* message);
     
 private:
     static websockets::WebsocketsClient webSocket;
@@ -153,6 +152,7 @@ private:
     static HardwareSerial* uartSerial; // Pointer to selected UART (Serial1/Serial2)
     static bool usingSerial;           // True when using UART transport
     static void handleIncoming(const char* message); // Shared handler for incoming messages
+
     
     // Auto-reporting and fallback polling
     static bool autoReportingEnabled;     // True if auto-reporting is active

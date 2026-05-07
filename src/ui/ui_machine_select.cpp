@@ -154,12 +154,6 @@ void UIMachineSelect::refreshMachineList() {
     int configured_count = getConfiguredMachineCount();
     Serial.printf("UIMachineSelect: Found %d configured machines\n", configured_count);
     
-    // Debug: Print each machine state
-    for (int i = 0; i < MAX_MACHINES; i++) {
-        Serial.printf("  Machine %d: is_configured=%d, name='%s'\n", 
-                     i, machines[i].is_configured, machines[i].name);
-    }
-    
     // Update Add button visibility (only show in edit mode)
     if (edit_mode && configured_count < MAX_MACHINES) {
         lv_obj_clear_flag(add_button, LV_OBJ_FLAG_HIDDEN);

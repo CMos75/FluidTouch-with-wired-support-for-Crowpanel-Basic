@@ -347,7 +347,7 @@ void UICommon::createMainUI() {
     
     // Connect to FluidNC using selected machine
     // Only reached if WiFi connected successfully (or wired connection)
-    Serial.printf("UICommon: Connecting to FluidNC at %s:%d\n", 
+    Serial.printf("[UICommon] Connecting to FluidNC at %s:%d\n", 
                  config.fluidnc_url, config.websocket_port);
     
     // For UART connections, force error dialog on timeout to prevent stuck connecting loops
@@ -944,8 +944,6 @@ void UICommon::showConnectingPopup(const char *machine_name, const char *ssid) {
     lv_label_set_text(conn_label, conn_text);
     lv_obj_set_style_text_font(conn_label, &lv_font_montserrat_22, 0);
     lv_obj_set_style_text_color(conn_label, UITheme::TEXT_LIGHT, 0);
-    
-    Serial.printf("UICommon: %s\n", conn_text);
 }
 
 void UICommon::hideConnectingPopup() {
@@ -1047,12 +1045,19 @@ static void on_connection_error_connect(lv_event_t *e) {
         // Initialize UART transport via FluidNCClient
         bool ok = FluidNCClient::connect(config);
         Serial.printf("UICommon: FluidNCClient::connect returned=%d\n", ok ? 1 : 0);
+
+        // *** WICHTIGER PATCH ***
+        // Bei UART NICHT sofort Fehler anzeigen.
+        // FluidNC braucht ~300–800ms, um Auto-Reporting zu aktivieren.
+        if (config.connection_type == CONN_UART) {
+            ok = true;  // Wir akzeptieren den Connect IMMER
+        }
+
         if (ok) {
-            // Start connection timeout monitoring (shorter timeout for forced UART)
             connection_timeout_start = millis();
             connection_timeout_active = true;
             connection_error_shown = false;
-            Serial.println("UICommon: Wired/UART initialized, waiting for status messages...");
+            Serial.println("UICommon: UART initialized, waiting for status messages...");
         } else {
             UICommon::hideConnectingPopup();
             UICommon::showConnectionErrorDialog("UART Connection Failed",
@@ -1193,6 +1198,16 @@ void UICommon::hideConnectionErrorDialog() {
 
 void UICommon::checkConnectionTimeout() {
     // If not monitoring timeout, nothing to do
+    MachineConfig cfg;
+    if (MachineConfigManager::getSelectedMachine(cfg)) {
+        if (cfg.connection_type == CONN_UART && !ever_connected_successfully) {
+            if (!ever_connected_successfully) {
+                // UART needs more time → do NOT show error
+                return;
+            }
+        }
+    }
+    
     if (!connection_timeout_active) {
         return;
     }
@@ -1209,11 +1224,7 @@ void UICommon::checkConnectionTimeout() {
     
     // Check if timeout exceeded (default 10 seconds)
     uint32_t elapsed = millis() - connection_timeout_start;
-    uint32_t threshold_ms = connection_timeout_force_error ? 10000 : 10000; // 10 seconds for all connections to ensure reliable timeout
-    // Debug: log timeout state for investigations
-    Serial.printf("UICommon: checkConnectionTimeout elapsed=%lums threshold=%lums ever_connected=%d force=%d active=%d shown=%d\n",
-                  (unsigned long)elapsed, (unsigned long)threshold_ms, ever_connected_successfully ? 1 : 0,
-                  connection_timeout_force_error ? 1 : 0, connection_timeout_active ? 1 : 0, connection_error_shown ? 1 : 0);
+    uint32_t threshold_ms = 10000;
     if (elapsed >= threshold_ms && !connection_error_shown && (!ever_connected_successfully || connection_timeout_force_error)) {
         // Only show error if we've never connected successfully (prevents popup on brief disconnects after initial connection)
         connection_error_shown = true;
