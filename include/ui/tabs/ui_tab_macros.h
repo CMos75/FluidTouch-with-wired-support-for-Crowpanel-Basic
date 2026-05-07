@@ -10,7 +10,7 @@
 // Macro configuration structure
 struct MacroConfig {
     char name[32];
-    char file_path[128];  // Path relative to /fluidtouch/macros/
+    char file_path[128];  // Full FluidNC path to the macro file (e.g. /sd/fluidtouch/macros/foo.gcode or /localfs/fluidtouch/macros/foo.gcode)
     uint8_t color_index;  // 0-7 for MACRO_COLOR_1 through MACRO_COLOR_8
     bool is_configured;
 };
@@ -75,6 +75,8 @@ private:
     static lv_color_t getColorByIndex(int index);
     static bool findPreviousConfiguredIndex(int current_index);
     static bool findNextConfiguredIndex(int current_index);
+    static bool isGCodeFile(const char *filename);
+    static void parseMacroFileList(const char *jsonBuffer, const char *scan_path);
     static void loadMacroFilesFromSD();
     
     // Event handlers

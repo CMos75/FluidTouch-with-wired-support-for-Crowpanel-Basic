@@ -21,6 +21,7 @@ lv_obj_t *UIMachineSelect::delete_buttons[MAX_MACHINES] = {nullptr};
 lv_obj_t *UIMachineSelect::add_button = nullptr;
 lv_obj_t *UIMachineSelect::config_dialog = nullptr;
 lv_obj_t *UIMachineSelect::dialog_content = nullptr;
+lv_obj_t *UIMachineSelect::fields_scroll = nullptr;
 lv_obj_t *UIMachineSelect::keyboard = nullptr;
 int UIMachineSelect::editing_index = -1;
 lv_obj_t *UIMachineSelect::ta_name = nullptr;
@@ -29,6 +30,10 @@ lv_obj_t *UIMachineSelect::ta_password = nullptr;
 lv_obj_t *UIMachineSelect::ta_url = nullptr;
 lv_obj_t *UIMachineSelect::ta_port = nullptr;
 lv_obj_t *UIMachineSelect::dd_connection_type = nullptr;
+lv_obj_t *UIMachineSelect::ta_uart_baud = nullptr;
+lv_obj_t *UIMachineSelect::dd_uart_port = nullptr;
+lv_obj_t *UIMachineSelect::ta_uart_rx_pin = nullptr;
+lv_obj_t *UIMachineSelect::ta_uart_tx_pin = nullptr;
 lv_obj_t *UIMachineSelect::delete_dialog = nullptr;
 int UIMachineSelect::deleting_index = -1;
 
@@ -286,13 +291,13 @@ void UIMachineSelect::refreshMachineList() {
                 lv_obj_set_width(name_label, 309);  // Set width for wrapping (349 - 40px padding)
                 lv_obj_align(name_label, LV_ALIGN_TOP_MID, 0, 0);  // Centered horizontally
                 
-                // Line 2: Connection type symbol + SSID/Wired (bottom area)
+                // Line 2: Connection type symbol + SSID/UART (bottom area)
                 lv_obj_t *connection_label = lv_label_create(machine_buttons[i]);
                 String connection_text;
                 if (machines[i].connection_type == CONN_WIRELESS) {
                     connection_text = String(LV_SYMBOL_WIFI) + " " + String(machines[i].ssid);
                 } else {
-                    connection_text = String(LV_SYMBOL_USB) + " Wired";
+                    connection_text = String(LV_SYMBOL_USB) + " UART";
                 }
                 lv_label_set_text(connection_label, connection_text.c_str());
                 lv_obj_set_style_text_font(connection_label, &lv_font_montserrat_26, 0);  // Larger font
@@ -567,13 +572,32 @@ void UIMachineSelect::onConfigSave(lv_event_t *e) {
     // Create config
     MachineConfig config;
     strncpy(config.name, name, sizeof(config.name) - 1);
-    config.connection_type = (sel == 0) ? CONN_WIRELESS : CONN_WIRED;
+    if (sel == 0) config.connection_type = CONN_WIRELESS;
+    else config.connection_type = CONN_UART;
     strncpy(config.ssid, ssid, sizeof(config.ssid) - 1);
     strncpy(config.password, password, sizeof(config.password) - 1);
     strncpy(config.fluidnc_url, url, sizeof(config.fluidnc_url) - 1);
     config.websocket_port = atoi(port_str);
     if (config.websocket_port == 0) config.websocket_port = 81;
     config.is_configured = true;
+
+    // UART fields
+    if (config.connection_type == CONN_UART) {
+        const char *baud_text = lv_textarea_get_text(ta_uart_baud);
+        if (baud_text && strlen(baud_text) > 0) config.uart_baud = (uint32_t)atol(baud_text);
+        else config.uart_baud = 115200;
+
+        uint16_t uart_sel = lv_dropdown_get_selected(dd_uart_port);
+        config.uart_port = (uint8_t)(uart_sel + 1);
+
+        const char *rx_text = lv_textarea_get_text(ta_uart_rx_pin);
+        if (!rx_text || strlen(rx_text) == 0) config.uart_rx_pin = -1;
+        else config.uart_rx_pin = atoi(rx_text);
+
+        const char *tx_text = lv_textarea_get_text(ta_uart_tx_pin);
+        if (!tx_text || strlen(tx_text) == 0) config.uart_tx_pin = -1;
+        else config.uart_tx_pin = atoi(tx_text);
+    }
     
     // Save
     MachineConfigManager::saveMachine(editing_index, config);
@@ -604,6 +628,20 @@ void UIMachineSelect::updateConnectionFields() {
         lv_obj_add_state(ta_ssid, LV_STATE_DISABLED);
         lv_obj_add_state(ta_password, LV_STATE_DISABLED);
     }
+
+    // UART-specific fields
+    bool is_uart = (sel == 1);
+    if (is_uart) {
+        lv_obj_clear_state(ta_uart_baud, LV_STATE_DISABLED);
+        lv_obj_clear_state(dd_uart_port, LV_STATE_DISABLED);
+        lv_obj_clear_state(ta_uart_rx_pin, LV_STATE_DISABLED);
+        lv_obj_clear_state(ta_uart_tx_pin, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(ta_uart_baud, LV_STATE_DISABLED);
+        lv_obj_add_state(dd_uart_port, LV_STATE_DISABLED);
+        lv_obj_add_state(ta_uart_rx_pin, LV_STATE_DISABLED);
+        lv_obj_add_state(ta_uart_tx_pin, LV_STATE_DISABLED);
+    }
 }
 
 void UIMachineSelect::showConfigDialog(int index) {
@@ -618,16 +656,23 @@ void UIMachineSelect::showConfigDialog(int index) {
     lv_obj_set_style_border_width(config_dialog, 0, 0);
     lv_obj_clear_flag(config_dialog, LV_OBJ_FLAG_SCROLLABLE);
     
-    // Scrollable dialog content container (780x460 to fit on screen with margin)
+    // Dialog content container (780x460 to fit on screen with margin)
     dialog_content = lv_obj_create(config_dialog);
     lv_obj_set_size(dialog_content, 780, 460);
     lv_obj_center(dialog_content);
     lv_obj_set_style_bg_color(dialog_content, UITheme::BG_MEDIUM, 0);
     lv_obj_set_style_border_color(dialog_content, UITheme::BORDER_MEDIUM, 0);
     lv_obj_set_style_border_width(dialog_content, 2, 0);
-    lv_obj_set_layout(dialog_content, LV_LAYOUT_NONE);  // Use absolute positioning instead of flex
+    lv_obj_set_layout(dialog_content, LV_LAYOUT_NONE);  // Use absolute positioning for dialog
     lv_obj_set_style_pad_all(dialog_content, 20, 0);
-    lv_obj_clear_flag(dialog_content, LV_OBJ_FLAG_SCROLLABLE);  // Disable scrolling
+
+    // Create a scrollable area for the main fields so the footer remains visible
+    fields_scroll = lv_obj_create(dialog_content);
+    lv_obj_set_size(fields_scroll, 740, 335); // dialog height (460) - title (35) - footer (70) - margins
+    lv_obj_set_pos(fields_scroll, 0, 35); // placed below title
+    lv_obj_set_style_bg_opa(fields_scroll, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(fields_scroll, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(fields_scroll, LV_SCROLLBAR_MODE_AUTO);
     
     // Title (uppercase, gray like settings section titles)
     lv_obj_t *dlg_title = lv_label_create(dialog_content);
@@ -637,10 +682,10 @@ void UIMachineSelect::showConfigDialog(int index) {
     lv_obj_set_pos(dlg_title, 0, 0);
     lv_obj_set_width(dlg_title, 740);  // 780 - 40px padding
     
-    // Main 2-column container for fields
-    lv_obj_t *fields_container = lv_obj_create(dialog_content);
+    // Main 2-column container for fields (placed inside scrollable area)
+    lv_obj_t *fields_container = lv_obj_create(fields_scroll);
     lv_obj_set_size(fields_container, 740, LV_SIZE_CONTENT);  // 780 - 40px padding
-    lv_obj_set_pos(fields_container, 0, 35);  // Below title
+    lv_obj_set_pos(fields_container, 0, 0);
     lv_obj_set_flex_flow(fields_container, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(fields_container, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_all(fields_container, 0, 0);
@@ -723,7 +768,7 @@ void UIMachineSelect::showConfigDialog(int index) {
     lv_obj_set_height(dd_connection_type, 48);
     lv_obj_set_style_text_font(dd_connection_type, &lv_font_montserrat_18, 0);
     lv_obj_set_style_pad_top(dd_connection_type, 12, LV_PART_MAIN);  // Adjust top padding to vertically center text
-    lv_dropdown_set_options(dd_connection_type, "Wireless");  // Wired option hidden for now, reserved for future
+    lv_dropdown_set_options(dd_connection_type, "Wireless\nUART");
     if (!is_new) lv_dropdown_set_selected(dd_connection_type, machines[index].connection_type);
     lv_obj_add_event_cb(dd_connection_type, onConnectionTypeChanged, LV_EVENT_VALUE_CHANGED, nullptr);
     
@@ -762,32 +807,113 @@ void UIMachineSelect::showConfigDialog(int index) {
         lv_textarea_set_text(ta_port, "81");
     }
     lv_obj_add_event_cb(ta_port, onTextareaFocused, LV_EVENT_FOCUSED, nullptr);
+
+    // UART Baud field
+    lv_obj_t *lbl_uart_baud = lv_label_create(right_col);
+    lv_label_set_text(lbl_uart_baud, "UART Baud:");
+    lv_obj_set_style_text_font(lbl_uart_baud, &lv_font_montserrat_18, 0);
+
+    ta_uart_baud = lv_textarea_create(right_col);
+    lv_obj_set_width(ta_uart_baud, LV_PCT(100));
+    lv_obj_set_height(ta_uart_baud, 40);
+    lv_textarea_set_one_line(ta_uart_baud, true);
+    lv_textarea_set_max_length(ta_uart_baud, 7);
+    lv_textarea_set_accepted_chars(ta_uart_baud, "0123456789");
+    lv_obj_set_style_text_font(ta_uart_baud, &lv_font_montserrat_18, 0);
+    if (!is_new) {
+        char baud_str[8];
+        snprintf(baud_str, sizeof(baud_str), "%lu", machines[index].uart_baud);
+        lv_textarea_set_text(ta_uart_baud, baud_str);
+    } else {
+        lv_textarea_set_text(ta_uart_baud, "115200");
+    }
+    lv_obj_add_event_cb(ta_uart_baud, onTextareaFocused, LV_EVENT_FOCUSED, nullptr);
+
+    // UART Port dropdown
+    lv_obj_t *lbl_uart_port = lv_label_create(right_col);
+    lv_label_set_text(lbl_uart_port, "UART Port:");
+    lv_obj_set_style_text_font(lbl_uart_port, &lv_font_montserrat_18, 0);
+
+    dd_uart_port = lv_dropdown_create(right_col);
+    lv_obj_set_width(dd_uart_port, LV_PCT(100));
+    lv_obj_set_height(dd_uart_port, 48);
+    lv_obj_set_style_text_font(dd_uart_port, &lv_font_montserrat_18, 0);
+    lv_dropdown_set_options(dd_uart_port, "UART1\nUART2");
+    if (!is_new) {
+        uint8_t selp = machines[index].uart_port;
+        if (selp < 1) selp = 1;
+        if (selp > 2) selp = 2;
+        lv_dropdown_set_selected(dd_uart_port, selp - 1);
+    } else {
+        lv_dropdown_set_selected(dd_uart_port, 1); // default to UART2
+    }
+    lv_obj_add_event_cb(dd_uart_port, onConnectionTypeChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // UART RX pin
+    lv_obj_t *lbl_uart_rx = lv_label_create(right_col);
+    lv_label_set_text(lbl_uart_rx, "UART RX Pin:");
+    lv_obj_set_style_text_font(lbl_uart_rx, &lv_font_montserrat_18, 0);
+
+    ta_uart_rx_pin = lv_textarea_create(right_col);
+    lv_obj_set_width(ta_uart_rx_pin, LV_PCT(100));
+    lv_obj_set_height(ta_uart_rx_pin, 40);
+    lv_textarea_set_one_line(ta_uart_rx_pin, true);
+    lv_textarea_set_max_length(ta_uart_rx_pin, 4);
+    lv_textarea_set_accepted_chars(ta_uart_rx_pin, "0123456789-");
+    lv_obj_set_style_text_font(ta_uart_rx_pin, &lv_font_montserrat_18, 0);
+    if (!is_new) {
+        char rx_str[6];
+        snprintf(rx_str, sizeof(rx_str), "%d", machines[index].uart_rx_pin);
+        lv_textarea_set_text(ta_uart_rx_pin, rx_str);
+    } else {
+        lv_textarea_set_text(ta_uart_rx_pin, "-1");
+    }
+    lv_obj_add_event_cb(ta_uart_rx_pin, onTextareaFocused, LV_EVENT_FOCUSED, nullptr);
+
+    // UART TX pin
+    lv_obj_t *lbl_uart_tx = lv_label_create(right_col);
+    lv_label_set_text(lbl_uart_tx, "UART TX Pin:");
+    lv_obj_set_style_text_font(lbl_uart_tx, &lv_font_montserrat_18, 0);
+
+    ta_uart_tx_pin = lv_textarea_create(right_col);
+    lv_obj_set_width(ta_uart_tx_pin, LV_PCT(100));
+    lv_obj_set_height(ta_uart_tx_pin, 40);
+    lv_textarea_set_one_line(ta_uart_tx_pin, true);
+    lv_textarea_set_max_length(ta_uart_tx_pin, 4);
+    lv_textarea_set_accepted_chars(ta_uart_tx_pin, "0123456789-");
+    lv_obj_set_style_text_font(ta_uart_tx_pin, &lv_font_montserrat_18, 0);
+    if (!is_new) {
+        char tx_str[6];
+        snprintf(tx_str, sizeof(tx_str), "%d", machines[index].uart_tx_pin);
+        lv_textarea_set_text(ta_uart_tx_pin, tx_str);
+    } else {
+        lv_textarea_set_text(ta_uart_tx_pin, "-1");
+    }
+    lv_obj_add_event_cb(ta_uart_tx_pin, onTextareaFocused, LV_EVENT_FOCUSED, nullptr);
     
-    // Button container at bottom with absolute positioning
-    lv_obj_t *btn_container = lv_obj_create(dialog_content);
-    lv_obj_set_size(btn_container, 740, 50);  // 780 - 40px padding
-    lv_obj_set_pos(btn_container, 0, 370);  // 460 - 20 padding - 50 height - 20 gap = 370
-    lv_obj_set_flex_flow(btn_container, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(btn_container, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_all(btn_container, 0, 0);
-    lv_obj_set_style_border_width(btn_container, 0, 0);
-    lv_obj_set_style_bg_opa(btn_container, LV_OPA_TRANSP, 0);
-    
-    lv_obj_t *btn_save = lv_btn_create(btn_container);
+    // Footer container (fixed) containing Save/Cancel buttons
+    lv_obj_t *footer = lv_obj_create(dialog_content);
+    lv_obj_set_size(footer, 740, 70);
+    lv_obj_set_pos(footer, 0, 370); // bottom area
+    lv_obj_set_style_bg_opa(footer, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *btn_save = lv_btn_create(footer);
     lv_obj_set_size(btn_save, LV_PCT(48), 50);
     lv_obj_set_style_bg_color(btn_save, UITheme::BTN_PLAY, 0);
     lv_obj_add_event_cb(btn_save, onConfigSave, LV_EVENT_CLICKED, nullptr);
-    
+
     lv_obj_t *lbl_save = lv_label_create(btn_save);
     lv_label_set_text(lbl_save, LV_SYMBOL_OK " Save");
     lv_obj_set_style_text_font(lbl_save, &lv_font_montserrat_18, 0);
     lv_obj_center(lbl_save);
-    
-    lv_obj_t *btn_cancel = lv_btn_create(btn_container);
+
+    lv_obj_t *btn_cancel = lv_btn_create(footer);
     lv_obj_set_size(btn_cancel, LV_PCT(48), 50);
     lv_obj_set_style_bg_color(btn_cancel, UITheme::BG_BUTTON, 0);
     lv_obj_add_event_cb(btn_cancel, onConfigCancel, LV_EVENT_CLICKED, nullptr);
-    
+
     lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
     lv_label_set_text(lbl_cancel, LV_SYMBOL_CLOSE " Cancel");
     lv_obj_set_style_text_font(lbl_cancel, &lv_font_montserrat_18, 0);
@@ -803,6 +929,7 @@ void UIMachineSelect::hideConfigDialog() {
         lv_obj_del(config_dialog);
         config_dialog = nullptr;
         dialog_content = nullptr;
+        fields_scroll = nullptr;
     }
     editing_index = -1;
 }
@@ -917,18 +1044,16 @@ void UIMachineSelect::showKeyboard(lv_obj_t *ta) {
             UIMachineSelect::hideKeyboard();
         }, LV_EVENT_CLICKED, nullptr);
         
-        // Add click event to dialog_content to close keyboard when clicking on dialog
-        lv_obj_add_event_cb(dialog_content, [](lv_event_t *e) {
+        // Add click event to fields_scroll to close keyboard when clicking on empty area
+        lv_obj_add_event_cb(fields_scroll, [](lv_event_t *e) {
             lv_obj_t *target = (lv_obj_t*)lv_event_get_target(e);
-            // Only close if clicking directly on dialog_content (not its children like textareas)
-            if (target == dialog_content) {
+            if (target == fields_scroll) {
                 UIMachineSelect::hideKeyboard();
             }
         }, LV_EVENT_CLICKED, nullptr);
-        
-        // Make dialog_content scrollable and add extra padding at bottom for keyboard
-        lv_obj_add_flag(dialog_content, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_pad_bottom(dialog_content, 240, 0); // Extra space for scrolling (keyboard height + margin)
+
+        // Make fields_scroll have extra padding at bottom for keyboard
+        lv_obj_set_style_pad_bottom(fields_scroll, 240, 0); // Extra space for scrolling (keyboard height + margin)
     }
     
     lv_keyboard_set_textarea(keyboard, ta);
@@ -940,31 +1065,28 @@ void UIMachineSelect::showKeyboard(lv_obj_t *ta) {
         lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
     }
     
-    // Scroll the dialog content to position the focused textarea just above keyboard
-    if (dialog_content && ta) {
-        // Get textarea position within dialog_content
+    // Scroll the fields_scroll content to position the focused textarea just above keyboard
+    if (fields_scroll && ta) {
+        // Get textarea position within fields_scroll
         lv_coord_t ta_y = lv_obj_get_y(ta);
         lv_obj_t *parent = lv_obj_get_parent(ta);
-        
-        // Walk up parent hierarchy to get cumulative Y position
-        while (parent && parent != dialog_content) {
+
+        // Walk up parent hierarchy to get cumulative Y position relative to fields_scroll
+        while (parent && parent != fields_scroll) {
             ta_y += lv_obj_get_y(parent);
             parent = lv_obj_get_parent(parent);
         }
-        
+
         // Calculate scroll position to place textarea just above keyboard
-        // Dialog is 460px tall, keyboard is 220px, so visible area is 240px
-        // Position textarea at bottom of visible area (240px from dialog top) minus field height and margin
-        lv_coord_t dialog_height = lv_obj_get_height(dialog_content);
         lv_coord_t visible_height = 240; // Height above keyboard
         lv_coord_t ta_height = lv_obj_get_height(ta);
-        lv_coord_t target_position = visible_height - ta_height - 15; // 15px margin above keyboard (5px gap + 10px padding)
-        
+        lv_coord_t target_position = visible_height - ta_height - 15; // margin above keyboard
+
         // Scroll amount = (textarea Y position) - (where we want it)
         lv_coord_t scroll_y = ta_y - target_position;
         if (scroll_y < 0) scroll_y = 0; // Don't scroll past top
-        
-        lv_obj_scroll_to_y(dialog_content, scroll_y, LV_ANIM_ON);
+
+        lv_obj_scroll_to_y(fields_scroll, scroll_y, LV_ANIM_ON);
     }
 }
 
@@ -973,11 +1095,10 @@ void UIMachineSelect::hideKeyboard() {
         lv_obj_del(keyboard);
         keyboard = nullptr;
         
-        // Restore dialog_content to non-scrollable and remove extra padding
-        if (dialog_content) {
-            lv_obj_clear_flag(dialog_content, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_set_style_pad_bottom(dialog_content, 20, 0); // Back to original padding
-            lv_obj_scroll_to_y(dialog_content, 0, LV_ANIM_ON); // Reset scroll position
+        // Restore fields_scroll padding and reset scroll position
+        if (fields_scroll) {
+            lv_obj_set_style_pad_bottom(fields_scroll, 20, 0); // Back to original padding
+            lv_obj_scroll_to_y(fields_scroll, 0, LV_ANIM_ON); // Reset scroll position
         }
         
         // Remove click event from config_dialog (clean up event handler)

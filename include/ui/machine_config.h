@@ -6,8 +6,8 @@
 #define MAX_MACHINES 4
 
 enum ConnectionType {
-    CONN_WIRED = 0,
-    CONN_WIRELESS = 1
+    CONN_WIRELESS = 0,
+    CONN_UART = 1
 };
 
 struct MachineConfig {
@@ -32,6 +32,12 @@ struct MachineConfig {
     int probe_max_distance;  // Default max probe distance (mm)
     int probe_retract;       // Default retract distance (mm)
     float probe_thickness;   // Default probe thickness (mm, 1 decimal place)
+
+    // UART connection settings (used when connection_type == CONN_UART)
+    uint32_t uart_baud;      // Baud rate for UART (default 115200)
+    int uart_rx_pin;         // RX pin number (-1 = use default)
+    int uart_tx_pin;         // TX pin number (-1 = use default)
+    uint8_t uart_port;       // UART port number: 1 => Serial1, 2 => Serial2 (default 2)
     
     // Constructor with defaults
     MachineConfig() : connection_type(CONN_WIRELESS), websocket_port(81), is_configured(false),
@@ -39,7 +45,8 @@ struct MachineConfig {
                       jog_xy_feed(3000), jog_z_feed(1000),
                       jog_max_xy_feed(3000), jog_max_z_feed(1000),
                       probe_feed_rate(100), probe_max_distance(10),
-                      probe_retract(2), probe_thickness(0.0f) {
+                      probe_retract(2), probe_thickness(0.0f),
+                      uart_baud(115200), uart_rx_pin(-1), uart_tx_pin(-1), uart_port(2) {
         name[0] = '\0';
         ssid[0] = '\0';
         password[0] = '\0';

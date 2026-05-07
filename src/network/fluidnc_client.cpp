@@ -1,8 +1,10 @@
 #include "network/fluidnc_client.h"
 #include "ui/ui_common.h"
 #include "ui/tabs/control/ui_tab_control_probe.h"
+#include "config.h"
 #include <WiFi.h>
 #include <ESPmDNS.h>
+#include <stdarg.h>
 
 using namespace websockets;
 
@@ -20,12 +22,30 @@ uint32_t FluidNCClient::lastPollingMs = 0;
 uint32_t FluidNCClient::lastGCodePollMs = 0;
 uint32_t FluidNCClient::lastAutoReportAttemptMs = 0;
 bool FluidNCClient::everConnectedSuccessfully = false;
+// UART transport state
+HardwareSerial* FluidNCClient::uartSerial = nullptr;
+bool FluidNCClient::usingSerial = false;
+static bool uartAutoReportSent = false;
+static uint32_t uartAutoReportFallbackTime = 0;
+// Serial read buffer
+static char _serial_read_buf[1024];
+static size_t _serial_read_pos = 0;
+bool debugEnabled = true; // Set to true to enable debug prints in FluidNCClient  
 
 void FluidNCClient::init() {
     if (initialized) return;
     
     Serial.println("[FluidNC] Initializing client");
     initialized = true;
+}
+
+void debugPrint(const char* fmt, ...) {
+    if (!debugEnabled) return;
+
+    va_list args;
+    va_start(args, fmt);
+    Serial.printf(fmt, args);
+    va_end(args);
 }
 
 bool FluidNCClient::connect(const MachineConfig &config) {
@@ -36,14 +56,110 @@ bool FluidNCClient::connect(const MachineConfig &config) {
     
     // Store config
     currentConfig = config;
+    // If the machine is configured for UART, initialize UART transport and return
+    if (config.connection_type == CONN_UART) {
+        debugEnabled = false;
+        debugPrint("[FluidNC] Connecting to machine via UART (port=%d, RX=%d, TX=%d, baud=%u)\n", 
+                      config.uart_port, config.uart_rx_pin, config.uart_tx_pin, (unsigned)config.uart_baud);
+
+        // Select UART instance
+        if (config.uart_port == 0) uartSerial = &Serial0;
+        else if (config.uart_port == 1) uartSerial = &Serial1;
+        else uartSerial = &Serial2; // default to Serial2
+
+        // Initialize UART: if pins provided, use begin with pins, otherwise use safe defaults
+        int rx_pin = config.uart_rx_pin;
+        int tx_pin = config.uart_tx_pin;
+        
+        // If using default pins (-1), check for hardware conflicts and use safe alternatives
+        if (rx_pin < 0 || tx_pin < 0) {
+            // For Basic hardware, GPIO16 conflicts with RGB display, so use GPIO18 (RX) and GPIO17 (TX)
+            #ifndef HARDWARE_ADVANCE
+            rx_pin = 18;  // Safe RX pin for Basic hardware
+            tx_pin = 17;  // Safe TX pin for Basic hardware
+            debugPrint("[FluidNC] Using safe UART pins for Basic hardware (RX=18, TX=17)");
+            #else
+            // For Advance hardware, use different safe pins if needed
+            rx_pin = 18;  // Safe RX pin for Advance hardware
+            tx_pin = 17;  // Safe TX pin for Advance hardware
+            debugPrint("[FluidNC] Using safe UART pins for Advance hardware (RX=18, TX=17)");
+            #endif
+        } else {
+            debugPrint("[FluidNC] Using custom UART pins (RX=%d, TX=%d)\n", rx_pin, tx_pin);
+        }
+        
+        uartSerial->begin(config.uart_baud, SERIAL_8N1, rx_pin, tx_pin);
+        delay(100);
+
+        // CRITICAL: Flush any boot messages or stale data from UART RX buffer
+        // FluidNC sends startup messages that can interfere with handshake
+        unsigned long flushStart = millis();
+        while (uartSerial->available() && millis() - flushStart < 200) {
+            uartSerial->read();  // Consume and discard any buffered data
+            delay(1);
+        }
+        delay(100);  // Give device time to settle
+
+        // GRBL Handshake: Send status request and wait for response
+        Serial.println("[FluidNC] UART: Sending handshake ('?')");
+        uartSerial->println("?");
+        uartSerial->flush();
+
+        unsigned long start = millis();
+        bool grblReady = false;
+        String line = "";
+
+        while (millis() - start < 1000) {
+            while (uartSerial->available()) {
+                char c = uartSerial->read();
+                if (c == '\n' || c == '\r') {
+                    if (line.length() > 0) {
+                        Serial.printf("[FluidNC] UART: Received line: %s\n", line.c_str());
+                        if (line.startsWith("<") && line.indexOf("|") > 0) {
+                            // Valid status response format
+                            grblReady = true;
+                            Serial.println("[FluidNC] UART: ✓ Handshake successful!");
+                            break;
+                        }
+                    }
+                    line = "";
+                } else if (c >= 32 && c <= 126) {
+                    // Only accumulate printable characters
+                    line += c;
+                }
+            }
+            if (grblReady) break;
+            delay(5);
+        }
+
+        if (grblReady) {
+            Serial.println("[FluidNC] UART: Enabling auto-reporting (250ms interval)");
+            uartSerial->println("$Report/Interval=250");
+            uartSerial->flush();
+            delay(50);
+
+            currentStatus.is_connected = true;
+            usingSerial = true;
+            autoReportingEnabled = true;
+            autoReportingAttempted = true;
+            uartAutoReportSent = true;
+            Serial.println("[FluidNC] UART: Connection established and ready!");
+            return true;
+        } else {
+            Serial.println("[FluidNC] UART: ✗ Handshake failed - no status response received");
+            usingSerial = false;
+            uartSerial->end();
+            return false;
+        }
+    }
     
     // Check WiFi connection first
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[FluidNC] Error: WiFi not connected");
+        debugPrint("[FluidNC] Error: WiFi not connected");
         return false;
     }
     
-    Serial.printf("[FluidNC] Connecting to %s:%d via WebSocket\n", 
+    debugPrint("[FluidNC] Connecting to %s:%d via WebSocket\n", 
                   config.fluidnc_url, config.websocket_port);
     
     // Resolve hostname if needed (mDNS support)
@@ -51,20 +167,20 @@ bool FluidNCClient::connect(const MachineConfig &config) {
     IPAddress serverIP;
     if (resolvedHost.indexOf('.') == -1 || resolvedHost.endsWith(".local")) {
         // It's a hostname or mDNS name, try to resolve it
-        Serial.printf("[FluidNC] Resolving hostname: %s\n", resolvedHost.c_str());
+        debugPrint("[FluidNC] Resolving hostname: %s\n", resolvedHost.c_str());
         
         // Try resolving with retries (mDNS can be slow to respond)
         bool resolved = false;
         for (int attempt = 0; attempt < 5 && !resolved; attempt++) {
             if (attempt > 0) {
-                Serial.printf("[FluidNC] Retry attempt %d/5...\n", attempt + 1);
+                debugPrint("[FluidNC] Retry attempt %d/5...\n", attempt + 1);
                 delay(1000);  // Longer delay between retries for mDNS
             }
             
             if (resolvedHost.endsWith(".local")) {
                 // Use MDNS.queryHost() for .local hostnames (strip the .local suffix)
                 String hostname = resolvedHost.substring(0, resolvedHost.length() - 6);
-                Serial.printf("[FluidNC] Using mDNS query for: %s\n", hostname.c_str());
+                debugPrint("[FluidNC] Using mDNS query for: %s\n", hostname.c_str());
                 serverIP = MDNS.queryHost(hostname);
             } else {
                 // Use standard DNS for non-.local hostnames
@@ -73,20 +189,20 @@ bool FluidNCClient::connect(const MachineConfig &config) {
             
             // Validate that we got a real IP address (not 0.0.0.0)
             if (serverIP != IPAddress(0, 0, 0, 0)) {
-                Serial.printf("[FluidNC] Resolved on attempt %d to IP: %s\n", attempt + 1, serverIP.toString().c_str());
+                debugPrint("[FluidNC] Resolved on attempt %d to IP: %s\n", attempt + 1, serverIP.toString().c_str());
                 resolved = true;
             } else {
-                Serial.printf("[FluidNC] Attempt %d returned invalid IP (0.0.0.0)\n", attempt + 1);
+                debugPrint("[FluidNC] Attempt %d returned invalid IP (0.0.0.0)\n", attempt + 1);
             }
         }
         
         if (!resolved) {
-            Serial.printf("[FluidNC] Failed to resolve hostname: %s after 5 attempts\n", resolvedHost.c_str());
-            Serial.println("[FluidNC] Tip: Try using the IP address instead, or check that mDNS is working on your network");
+            debugPrint("[FluidNC] Failed to resolve hostname: %s after 5 attempts\n", resolvedHost.c_str());
+            debugPrint("[FluidNC] Tip: Try using the IP address instead, or check that mDNS is working on your network");
             return false;
         }
         resolvedHost = serverIP.toString();
-        Serial.printf("[FluidNC] Using resolved IP: %s\n", resolvedHost.c_str());
+        debugPrint("[FluidNC] Using resolved IP: %s\n", resolvedHost.c_str());
     }
     
     // Set up event callbacks
@@ -111,8 +227,19 @@ bool FluidNCClient::connect(const MachineConfig &config) {
 }
 
 void FluidNCClient::disconnect() {
-    Serial.println("[FluidNC] Disconnecting");
-    webSocket.close();
+    debugEnabled = true;
+    if(debugEnabled) {
+        debugPrint("[FluidNC] Debug: Disconnecting");
+    }
+
+    if (usingSerial) {
+        // For UART, just stop reading / end serial
+        if (uartSerial) uartSerial->end();
+        usingSerial = false;
+        uartSerial = nullptr;
+    } else {
+        webSocket.close();
+    }
     currentStatus.is_connected = false;
     currentStatus.state = STATE_DISCONNECTED;
 }
@@ -125,6 +252,7 @@ void FluidNCClient::stopReconnectionAttempts() {
 }
 
 bool FluidNCClient::isConnected() {
+    if (usingSerial) return currentStatus.is_connected;
     return currentStatus.is_connected && webSocket.available();
 }
 
@@ -134,7 +262,72 @@ bool FluidNCClient::isAutoReporting() {
 
 void FluidNCClient::loop() {
     if (!initialized) return;
-    
+    // Block UART reading until a machine is selected
+    if (currentConfig.name[0] == '\0') {
+        if (uartSerial) { /// Flush UART to avoid buffer buildup
+            while (uartSerial && uartSerial->available()) uartSerial->read();
+        }
+        return;
+    }
+
+    // Block UART reading until GRBL handshake is complete
+    if (usingSerial && !currentStatus.is_connected) {
+        if (uartSerial) { /// Ignore all incoming data until GRBL is ready
+            while (uartSerial && uartSerial->available()) uartSerial->read();
+        }
+        return;
+    }
+    // Handle WebSocket events or UART input depending on transport
+    if (usingSerial) {
+        // --- UART Auto-Report Fallback (wenn FluidNC nichts sendet) ---
+        if (!uartAutoReportSent && millis() > uartAutoReportFallbackTime) {
+            uartAutoReportSent = true;
+            Serial.println("[FluidNC] Fallback: enabling auto-report after delay...");
+            uartSerial->println("$Report/Interval=250");
+            uartSerial->flush();
+            autoReportingAttempted = true;
+        }
+        // Read incoming bytes and split into lines
+        // Limit bytes read per call to prevent blocking the main loop and UI
+        int bytes_read = 0;
+        const int MAX_BYTES_PER_LOOP = 32;  // Read max 32 bytes per loop call - return control very quickly
+        
+        while (uartSerial && uartSerial->available() && bytes_read < MAX_BYTES_PER_LOOP) {
+            int c = uartSerial->read();
+            bytes_read++;
+            
+            if (c == '\r') continue;
+            if (c == '\n' || c == '>') {
+                // If we hit '>' treat it as end of status token as well
+                if (_serial_read_pos >= sizeof(_serial_read_buf) - 1) _serial_read_pos = sizeof(_serial_read_buf) - 1;
+                _serial_read_buf[_serial_read_pos] = '\0';
+                if (_serial_read_pos > 0) {
+                    handleIncoming(_serial_read_buf);
+                }
+                _serial_read_pos = 0;
+                // If c was '>' there might be a following newline; continue looping
+                continue;
+            }
+            if (_serial_read_pos < sizeof(_serial_read_buf) - 1) {
+                _serial_read_buf[_serial_read_pos++] = (char)c;
+            }
+            
+            // Yield control periodically to allow other tasks and I2C transactions to complete
+            if (bytes_read % 4 == 0) {
+                yield();
+            }
+        }
+        
+        // Always call lv_timer_handler after UART reading to process touch input
+        lv_timer_handler();
+
+        // Allow auto-reporting / fallback polling logic when connected via UART
+        if (!autoReportingAttempted && !autoReportingEnabled) {
+            performFallbackPolling();
+        }
+        return;
+    }
+
     // Handle WebSocket events - ArduinoWebsockets handles polling internally
     webSocket.poll();
     
@@ -170,16 +363,22 @@ void FluidNCClient::sendCommand(const char* command) {
         Serial.println("[FluidNC] Error: Not connected");
         return;
     }
-    
+
     Serial.printf("[FluidNC] Sending command: %s\n", command);
-    webSocket.send(command);
+    if (usingSerial && uartSerial) {
+        // Ensure newline termination
+        String s = String(command);
+        if (!s.endsWith("\n")) s += "\n";
+        uartSerial->print(s);
+    } else {
+        webSocket.send(command);
+    }
 }
 
 void FluidNCClient::requestStatusReport() {
     if (!currentStatus.is_connected) return;
-    
     // Send status query command (realtime command)
-    webSocket.send("?");
+    sendCommand("?");
 }
 
 String FluidNCClient::getMachineIP() {
@@ -231,28 +430,48 @@ void FluidNCClient::clearTerminalCallback() {
 }
 
 void FluidNCClient::onMessageCallback(WebsocketsMessage message) {
-    const char* payload = message.c_str();
-    
+    // Route to shared handler
+    handleIncoming(message.c_str());
+}
+
+// Public test shim to allow harnesses to feed messages into the internal parser
+void FluidNCClient::test_handleIncoming(const char* message) {
+    handleIncoming(message);
+}
+
+void FluidNCClient::handleIncoming(const char* payload) {
+    // Shared handler for both WebSocket and UART incoming messages
+    if (!payload || payload[0] == '\0') return;
+
     // Only log non-status messages to reduce serial spam
     if (payload[0] != '<') {
         Serial.printf("[FluidNC] Received: %s\n", payload);
     }
-    
+
     // Call message callback if registered (for file lists, etc.)
     if (messageCallback) {
         messageCallback(payload);
     }
-    
+
     // Call terminal callback if registered (for terminal display)
     // Terminal tab will filter out status messages (starting with '<')
     if (terminalCallback) {
         terminalCallback(payload);
     }
-    
+
     // Parse different message types
     if (payload[0] == '<') {
         // Status report: <Idle|MPos:0.000,0.000,0.000|WPos:0.000,0.000,0.000|...>
         parseStatusReport(payload);
+        // Auto-Reporting aktivieren, sobald erster Status empfangen wird
+        if (!currentStatus.is_connected && usingSerial) {
+            currentStatus.is_connected = true;
+
+            if (!autoReportingAttempted) {
+                Serial.println("[FluidNC] First status received -> enabling auto-reporting");
+                attemptEnableAutoReporting();
+            }
+        }
     } else if (strncmp(payload, "[GC:", 4) == 0) {
         // GCode parser state: [GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]
         parseGCodeState(payload);
@@ -484,6 +703,14 @@ void FluidNCClient::parseStatusReport(const char* message) {
 
 void FluidNCClient::parseRealtimeFeedback(const char* message) {
     // Handle realtime feedback messages like [MSG:...], [G92:...], [PRB:...], etc.
+    if (usingSerial && !uartAutoReportSent) {
+        uartAutoReportSent = true;
+        Serial.println("[FluidNC] UART ready, enabling auto-report...");
+        uartSerial->println("$Report/Interval=250");
+        uartSerial->flush();
+        autoReportingAttempted = true;
+    }
+    
     Serial.printf("[FluidNC] Feedback: %s\n", message);
     
     // Check for probe result message: [PRB:x,y,z:success]
@@ -652,7 +879,7 @@ void FluidNCClient::extractString(const char* str, const char* key, char* dest, 
 
 void FluidNCClient::attemptEnableAutoReporting() {
     Serial.println("[FluidNC] Attempting to enable automatic reporting (250ms)");
-    webSocket.send("$Report/Interval=250\n");
+    sendCommand("$Report/Interval=250\n");
     
     autoReportingAttempted = true;
     autoReportingEnabled = false;  // Will be set true when we receive status
@@ -670,14 +897,14 @@ void FluidNCClient::performFallbackPolling() {
     // Send status poll ("?") every 1 second
     if (now - lastPollingMs >= 1000) {
         Serial.println("[FluidNC] Fallback polling: sending '?'");
-        webSocket.send("?");
+        sendCommand("?");
         lastPollingMs = now;
     }
     
     // Send GCode parser state poll ("$G") every 10 seconds
     if (now - lastGCodePollMs >= 10000) {
         Serial.println("[FluidNC] Fallback polling: sending '$G'");
-        webSocket.send("$G\n");
+        sendCommand("$G\n");
         lastGCodePollMs = now;
     }
 }

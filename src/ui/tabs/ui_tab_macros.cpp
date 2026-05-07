@@ -38,6 +38,78 @@ int UITabMacros::editing_index = -1;
 lv_obj_t *UITabMacros::delete_dialog = nullptr;
 std::vector<std::string> UITabMacros::macro_files;
 
+static String getMacroFileDisplayName(const std::string &path) {
+    const char *cstr = path.c_str();
+    const char *basename = strrchr(cstr, '/');
+    if (basename && basename[1] != '\0') {
+        if (strncmp(cstr, "/localfs/", 9) == 0) {
+            return String("LocalFS: ") + (basename + 1);
+        }
+        if (strncmp(cstr, "/sd/", 4) == 0) {
+            return String("SD: ") + (basename + 1);
+        }
+        return String(basename + 1);
+    }
+    return String(cstr);
+}
+
+bool UITabMacros::isGCodeFile(const char *filename) {
+    if (!filename || filename[0] == '\0') return false;
+    String lowercase = String(filename);
+    lowercase.toLowerCase();
+    return lowercase.endsWith(".g") || lowercase.endsWith(".gcode");
+}
+
+void UITabMacros::parseMacroFileList(const char *jsonBuffer, const char *scan_path) {
+    Serial.printf("[Macros] Parsing JSON response for %s\n", scan_path);
+
+    DynamicJsonDocument doc(8192);
+    DeserializationError error = deserializeJson(doc, jsonBuffer);
+    if (error) {
+        Serial.printf("[Macros] JSON parse failed: %s\n", error.c_str());
+        return;
+    }
+
+    const char *response_path = scan_path;
+    if (doc["path"].is<const char*>()) {
+        response_path = doc["path"];
+    }
+
+    String base_path = String(response_path);
+    if (!base_path.endsWith("/")) {
+        base_path += "/";
+    }
+
+    if (!doc["files"].is<JsonArray>()) {
+        Serial.println("[Macros] No 'files' array in JSON response");
+        return;
+    }
+
+    JsonArray files = doc["files"].as<JsonArray>();
+    for (JsonObject file : files) {
+        if (!file["name"].is<const char*>()) continue;
+        const char *filename = file["name"];
+
+        int32_t filesize = -1;
+        if (file["size"].is<int>()) {
+            filesize = file["size"].as<int>();
+        } else if (file["size"].is<const char*>()) {
+            filesize = atoi(file["size"].as<const char*>());
+        }
+
+        if (filesize < 0) {
+            continue; // Skip directories and invalid entries
+        }
+        if (!isGCodeFile(filename)) {
+            continue; // Only macro-worthy gcode files
+        }
+
+        String fullpath = base_path + String(filename);
+        Serial.printf("[Macros] Found macro file: %s\n", fullpath.c_str());
+        UITabMacros::macro_files.push_back(fullpath.c_str());
+    }
+}
+
 void UITabMacros::create(lv_obj_t *tab) {
     parent_tab = tab;
     is_edit_mode = false;
@@ -146,7 +218,7 @@ void UITabMacros::create(lv_obj_t *tab) {
 
     // Empty message label (shown when no macros configured)
     lbl_empty_message = lv_label_create(macro_container);
-    lv_label_set_text(lbl_empty_message, "No macros configured.\n\nClick " LV_SYMBOL_EDIT " Edit to add macros.\n\nMacro files must be on machine SD card in /fluidtouch/macros directory.");
+    lv_label_set_text(lbl_empty_message, "No macros configured.\n\nClick " LV_SYMBOL_EDIT " Edit to add macros.\n\nMacro files may be on FluidNC SD (/sd/fluidtouch/macros) or FluidNC flash LocalFS (/localfs/).");
     lv_obj_set_style_text_font(lbl_empty_message, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_empty_message, UITheme::TEXT_LIGHT, 0);
     lv_obj_set_style_text_align(lbl_empty_message, LV_TEXT_ALIGN_CENTER, 0);
@@ -447,10 +519,11 @@ void UITabMacros::onMacroClicked(lv_event_t *e) {
     UITabMacros::showProgress();
     Serial.printf("[Macros] Progress display initialized and shown\n");
     
-    // Build the $SD/Run command with full path
-    // FluidNC expects: $SD/Run=/sd/fluidtouch/macros/filename.gcode
+    // Build the correct FluidNC run command for the selected file
+    const char *file_path = macros[index].file_path;
+    const char *cmd_prefix = (strncmp(file_path, "/localfs/", 9) == 0) ? "$LocalFS/Run=" : "$SD/Run=";
     char command[256];
-    snprintf(command, sizeof(command), "$SD/Run=/sd/fluidtouch/macros/%s\n", macros[index].file_path);
+    snprintf(command, sizeof(command), "%s%s\n", cmd_prefix, file_path);
     
     Serial.printf("Executing macro: %s\n", command);
     FluidNCClient::sendCommand(command);
@@ -572,7 +645,7 @@ void UITabMacros::showConfigDialog(bool is_add) {
     
     // File Path label
     lv_obj_t *path_label = lv_label_create(dialog);
-    lv_label_set_text(path_label, "File: /sd/fluidtouch/macros/");
+    lv_label_set_text(path_label, "Macro File:");
     lv_obj_set_style_text_font(path_label, &lv_font_montserrat_20, 0);
     lv_obj_set_pos(path_label, 0, 145);
     
@@ -607,7 +680,7 @@ void UITabMacros::showConfigDialog(bool is_add) {
         
         for (size_t i = 0; i < UITabMacros::macro_files.size(); i++) {
             options += "\n";
-            options += UITabMacros::macro_files[i].c_str();
+            options += getMacroFileDisplayName(UITabMacros::macro_files[i]);
             
             // Find the currently selected file if editing (add 1 to index for placeholder offset)
             if (!is_add && strcmp(macro_files[i].c_str(), macros[editing_index].file_path) == 0) {
@@ -708,8 +781,7 @@ void UITabMacros::onConfigSave(lv_event_t *e) {
     int color_index = selected_color_index;
     
     // Get selected file from dropdown
-    char path_buffer[128];
-    lv_dropdown_get_selected_str(config_path_dropdown, path_buffer, sizeof(path_buffer));
+    int selected_idx = lv_dropdown_get_selected(config_path_dropdown);
     
     // Validate inputs
     if (strlen(name) == 0) {
@@ -717,15 +789,16 @@ void UITabMacros::onConfigSave(lv_event_t *e) {
         return;
     }
     
-    if (strlen(path_buffer) == 0 || strcmp(path_buffer, "Loading files...") == 0 || 
-        strcmp(path_buffer, "-- Select a file --") == 0) {
+    if (selected_idx <= 0 || selected_idx > (int)UITabMacros::macro_files.size()) {
         Serial.println("Macro file path is required");
         return;
     }
     
+    const std::string &selected_file = UITabMacros::macro_files[selected_idx - 1];
+
     // Save macro configuration
     strncpy(macros[editing_index].name, name, sizeof(macros[editing_index].name) - 1);
-    strncpy(macros[editing_index].file_path, path_buffer, sizeof(macros[editing_index].file_path) - 1);
+    strncpy(macros[editing_index].file_path, selected_file.c_str(), sizeof(macros[editing_index].file_path) - 1);
     macros[editing_index].color_index = color_index;
     macros[editing_index].is_configured = true;
     
@@ -915,156 +988,141 @@ void UITabMacros::hideKeyboard() {
     }
 }
 
-// Load macro files from SD card
+// Load macro files from FluidNC SD and LocalFS
 void UITabMacros::loadMacroFilesFromSD() {
     UITabMacros::macro_files.clear();
     
-    Serial.println("[Macros] Requesting file list from SD card");
+    Serial.println("[Macros] Requesting file list from SD card and LocalFS");
     
-    // Register callback to receive JSON file list response
+    static const char *scan_paths[] = {
+        "/sd/fluidtouch/macros",
+        "/localfs/"
+    };
+    static const int scan_count = sizeof(scan_paths) / sizeof(scan_paths[0]);
+
     FluidNCClient::setMessageCallback([](const char* message) {
         static String jsonBuffer;
         static bool collecting = false;
         static uint32_t lastMessageTime = 0;
-        
+        static int current_scan_index = 0;
+
         String msg(message);
-        msg.trim();
+        while (msg.endsWith("\r") || msg.endsWith("\n")) {
+            msg.remove(msg.length() - 1);
+        }
+
         uint32_t now = millis();
-        
-        // Reset buffer if timeout
-        if (now - lastMessageTime > 3000) {
-            if (jsonBuffer.length() > 0 && collecting) {
-                Serial.println("[Macros] Timeout - parsing JSON buffer");
-                // Parse the accumulated JSON
-                JsonDocument doc;
-                DeserializationError error = deserializeJson(doc, jsonBuffer);
-                
-                if (!error && doc["files"].is<JsonArray>()) {
-                    JsonArray files = doc["files"];
-                    for (JsonObject file : files) {
-                        if (file["name"].is<const char*>()) {
-                            const char* filename = file["name"];
-                            UITabMacros::macro_files.push_back(filename);
-                        }
-                    }
-                    Serial.printf("[Macros] Found %d macro files\n", UITabMacros::macro_files.size());
-                    
-                    // Sort files alphabetically (case-insensitive)
-                    std::sort(UITabMacros::macro_files.begin(), UITabMacros::macro_files.end(),
-                        [](const std::string &a, const std::string &b) {
-                            std::string a_lower = a;
-                            std::string b_lower = b;
-                            std::transform(a_lower.begin(), a_lower.end(), a_lower.begin(), ::tolower);
-                            std::transform(b_lower.begin(), b_lower.end(), b_lower.begin(), ::tolower);
-                            return a_lower < b_lower;
-                        });
-                    
-                    // Update dropdown if it exists
-                    if (UITabMacros::config_path_dropdown) {
-                        String options = "-- Select a file --";  // Add blank placeholder at top
-                        int selected_idx = 0;  // Default to placeholder
-                        
-                        for (size_t i = 0; i < UITabMacros::macro_files.size(); i++) {
-                            options += "\n";
-                            options += UITabMacros::macro_files[i].c_str();
-                            
-                            // Find matching file if editing (add 1 to index for placeholder offset)
-                            if (UITabMacros::editing_index >= 0 && 
-                                strcmp(UITabMacros::macro_files[i].c_str(), 
-                                       UITabMacros::macros[UITabMacros::editing_index].file_path) == 0) {
-                                selected_idx = i + 1;  // +1 for placeholder at index 0
-                            }
-                        }
-                        
-                        lv_dropdown_set_options(UITabMacros::config_path_dropdown, options.c_str());
-                        
-                        // Set selected index if editing
-                        if (UITabMacros::editing_index >= 0) {
-                            lv_dropdown_set_selected(UITabMacros::config_path_dropdown, selected_idx);
-                            Serial.printf("[Macros] Dropdown updated, selected index %d for file '%s'\n", 
-                                selected_idx, UITabMacros::macros[UITabMacros::editing_index].file_path);
-                        } else {
-                            Serial.println("[Macros] Dropdown updated with file list");
-                        }
-                    }
-                }
-                FluidNCClient::clearMessageCallback();
-            }
+        if (now - lastMessageTime > 3000 && collecting) {
+            Serial.println("[Macros] Timeout - parsing JSON buffer");
+            UITabMacros::parseMacroFileList(jsonBuffer.c_str(), scan_paths[current_scan_index]);
             jsonBuffer = "";
             collecting = false;
+            current_scan_index++;
+
+            if (current_scan_index < scan_count) {
+                Serial.printf("[Macros] Requesting file list from %s\n", scan_paths[current_scan_index]);
+                char cmd[256];
+                snprintf(cmd, sizeof(cmd), "$Files/ListGcode=%s\n", scan_paths[current_scan_index]);
+                FluidNCClient::sendCommand(cmd);
+            } else {
+                Serial.printf("[Macros] Finalizing file list (%d files)\n", UITabMacros::macro_files.size());
+                std::sort(UITabMacros::macro_files.begin(), UITabMacros::macro_files.end(),
+                    [](const std::string &a, const std::string &b) {
+                        std::string a_lower = a;
+                        std::string b_lower = b;
+                        std::transform(a_lower.begin(), a_lower.end(), a_lower.begin(), ::tolower);
+                        std::transform(b_lower.begin(), b_lower.end(), b_lower.begin(), ::tolower);
+                        return a_lower < b_lower;
+                    });
+
+                if (UITabMacros::config_path_dropdown) {
+                    String options = "-- Select a file --";
+                    int selected_idx = 0;
+
+                    for (size_t i = 0; i < UITabMacros::macro_files.size(); i++) {
+                        options += "\n";
+                        options += getMacroFileDisplayName(UITabMacros::macro_files[i]);
+                        if (UITabMacros::editing_index >= 0 &&
+                            strcmp(UITabMacros::macro_files[i].c_str(), UITabMacros::macros[UITabMacros::editing_index].file_path) == 0) {
+                            selected_idx = i + 1;
+                        }
+                    }
+
+                    if (UITabMacros::macro_files.empty()) {
+                        options = "No macro files found";
+                    }
+
+                    lv_dropdown_set_options(UITabMacros::config_path_dropdown, options.c_str());
+                    if (UITabMacros::editing_index >= 0 && !UITabMacros::macro_files.empty()) {
+                        lv_dropdown_set_selected(UITabMacros::config_path_dropdown, selected_idx);
+                    }
+                }
+
+                current_scan_index = 0;
+                FluidNCClient::clearMessageCallback();
+            }
         }
         lastMessageTime = now;
-        
-        // Skip status reports and other messages
+
         if (msg.startsWith("<") || msg.startsWith("[GC:") || msg.startsWith("[MSG:") || msg.startsWith("PING:")) {
             return;
         }
-        
-        // Check for end of response
+
         if (msg.equalsIgnoreCase("ok")) {
             if (collecting) {
                 Serial.println("[Macros] Received 'ok', parsing JSON");
-                // Parse the accumulated JSON
-                JsonDocument doc;
-                DeserializationError error = deserializeJson(doc, jsonBuffer);
-                
-                if (!error && doc["files"].is<JsonArray>()) {
-                    JsonArray files = doc["files"];
-                    for (JsonObject file : files) {
-                        if (file["name"].is<const char*>()) {
-                            const char* filename = file["name"];
-                            UITabMacros::macro_files.push_back(filename);
-                        }
-                    }
-                    Serial.printf("[Macros] Found %d macro files\n", UITabMacros::macro_files.size());
-                    
-                    // Sort files alphabetically (case-insensitive)
-                    std::sort(UITabMacros::macro_files.begin(), UITabMacros::macro_files.end(),
-                        [](const std::string &a, const std::string &b) {
-                            std::string a_lower = a;
-                            std::string b_lower = b;
-                            std::transform(a_lower.begin(), a_lower.end(), a_lower.begin(), ::tolower);
-                            std::transform(b_lower.begin(), b_lower.end(), b_lower.begin(), ::tolower);
-                            return a_lower < b_lower;
-                        });
-                    
-                    // Update dropdown if it exists
-                    if (UITabMacros::config_path_dropdown) {
-                        String options = "-- Select a file --";  // Add blank placeholder at top
-                        int selected_idx = 0;  // Default to placeholder
-                        
-                        for (size_t i = 0; i < UITabMacros::macro_files.size(); i++) {
-                            options += "\n";
-                            options += UITabMacros::macro_files[i].c_str();
-                            
-                            // Find matching file if editing (add 1 to index for placeholder offset)
-                            if (UITabMacros::editing_index >= 0 && 
-                                strcmp(UITabMacros::macro_files[i].c_str(), 
-                                       UITabMacros::macros[UITabMacros::editing_index].file_path) == 0) {
-                                selected_idx = i + 1;  // +1 for placeholder at index 0
-                            }
-                        }
-                        
-                        lv_dropdown_set_options(UITabMacros::config_path_dropdown, options.c_str());
-                        
-                        // Set selected index if editing
-                        if (UITabMacros::editing_index >= 0) {
-                            lv_dropdown_set_selected(UITabMacros::config_path_dropdown, selected_idx);
-                            Serial.printf("[Macros] Dropdown updated, selected index %d for file '%s'\n", 
-                                selected_idx, UITabMacros::macros[UITabMacros::editing_index].file_path);
-                        } else {
-                            Serial.println("[Macros] Dropdown updated with file list");
-                        }
-                    }
-                }
+                UITabMacros::parseMacroFileList(jsonBuffer.c_str(), scan_paths[current_scan_index]);
                 jsonBuffer = "";
                 collecting = false;
+                current_scan_index++;
+
+                if (current_scan_index < scan_count) {
+                    Serial.printf("[Macros] Requesting file list from %s\n", scan_paths[current_scan_index]);
+                    char cmd[256];
+                    snprintf(cmd, sizeof(cmd), "$Files/ListGcode=%s\n", scan_paths[current_scan_index]);
+                    FluidNCClient::sendCommand(cmd);
+                    return;
+                }
+
+                Serial.printf("[Macros] Finalizing file list (%d files)\n", UITabMacros::macro_files.size());
+                std::sort(UITabMacros::macro_files.begin(), UITabMacros::macro_files.end(),
+                    [](const std::string &a, const std::string &b) {
+                        std::string a_lower = a;
+                        std::string b_lower = b;
+                        std::transform(a_lower.begin(), a_lower.end(), a_lower.begin(), ::tolower);
+                        std::transform(b_lower.begin(), b_lower.end(), b_lower.begin(), ::tolower);
+                        return a_lower < b_lower;
+                    });
+
+                if (UITabMacros::config_path_dropdown) {
+                    String options = "-- Select a file --";
+                    int selected_idx = 0;
+
+                    for (size_t i = 0; i < UITabMacros::macro_files.size(); i++) {
+                        options += "\n";
+                        options += getMacroFileDisplayName(UITabMacros::macro_files[i]);
+                        if (UITabMacros::editing_index >= 0 &&
+                            strcmp(UITabMacros::macro_files[i].c_str(), UITabMacros::macros[UITabMacros::editing_index].file_path) == 0) {
+                            selected_idx = i + 1;
+                        }
+                    }
+
+                    if (UITabMacros::macro_files.empty()) {
+                        options = "No macro files found";
+                    }
+
+                    lv_dropdown_set_options(UITabMacros::config_path_dropdown, options.c_str());
+                    if (UITabMacros::editing_index >= 0 && !UITabMacros::macro_files.empty()) {
+                        lv_dropdown_set_selected(UITabMacros::config_path_dropdown, selected_idx);
+                    }
+                }
+
+                current_scan_index = 0;
                 FluidNCClient::clearMessageCallback();
             }
             return;
         }
-        
-        // Start collecting JSON
+
         if (msg.startsWith("[JSON:") || msg.startsWith("{\"files")) {
             if (!collecting) {
                 Serial.println("[Macros] Starting JSON collection");
@@ -1080,12 +1138,10 @@ void UITabMacros::loadMacroFilesFromSD() {
             }
             jsonBuffer += jsonLine;
         } else if (collecting) {
-            // Continue accumulating JSON lines
             jsonBuffer += msg;
         }
     });
     
-    // Send command to list files from macros directory
     FluidNCClient::sendCommand("$Files/ListGcode=/sd/fluidtouch/macros\n");
 }
 

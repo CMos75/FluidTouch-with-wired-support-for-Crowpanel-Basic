@@ -31,6 +31,7 @@ public:
     static void hideConnectingPopup();
     static void showConnectionErrorDialog(const char *title, const char *message);
     static void hideConnectionErrorDialog();
+    static bool isConnectionErrorDialogActive() { return connection_error_dialog_active; }
     static void checkConnectionTimeout();  // Non-blocking timeout check
     
     // State popup functions (HOLD and ALARM)
@@ -51,12 +52,15 @@ public:
 private:
     static lv_display_t *display;
     static DisplayDriver *display_driver;
+    static lv_obj_t *main_screen;            // Main application screen
     static lv_obj_t *status_bar;
     static lv_obj_t *status_bar_left_area;   // Clickable area for Status tab
     static lv_obj_t *status_bar_right_area;  // Clickable area for machine selection
     static lv_obj_t *machine_select_dialog;  // Confirmation dialog
     static lv_obj_t *connecting_popup;       // Connecting popup
     static lv_obj_t *connection_error_dialog; // Connection error dialog
+    static lv_obj_t *connection_error_screen; // Screen for error dialog
+    static bool connection_error_dialog_active; // Flag for dialog state
     static lv_obj_t *hold_popup;             // HOLD state popup
     static lv_obj_t *alarm_popup;            // ALARM state popup
     static int last_popup_state;             // Track last state to detect changes

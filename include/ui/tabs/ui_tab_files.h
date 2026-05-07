@@ -46,6 +46,7 @@ private:
     static lv_obj_t *upload_progress_dialog;
     static lv_obj_t *upload_progress_bar;
     static lv_obj_t *upload_progress_label;
+    static lv_obj_t *upload_dest_dropdown;
     static std::vector<std::string> file_names;
     static std::string current_path;  // Track current directory path
     static bool initial_load_done;    // Track if initial file list has been loaded

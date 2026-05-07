@@ -16,12 +16,15 @@
 // Static member initialization
 lv_display_t *UICommon::display = nullptr;
 DisplayDriver *UICommon::display_driver = nullptr;
+lv_obj_t *UICommon::main_screen = nullptr;
 lv_obj_t *UICommon::status_bar = nullptr;
 lv_obj_t *UICommon::status_bar_left_area = nullptr;
 lv_obj_t *UICommon::status_bar_right_area = nullptr;
 lv_obj_t *UICommon::machine_select_dialog = nullptr;
 lv_obj_t *UICommon::connecting_popup = nullptr;
 lv_obj_t *UICommon::connection_error_dialog = nullptr;
+lv_obj_t *UICommon::connection_error_screen = nullptr;
+bool UICommon::connection_error_dialog_active = false;
 lv_obj_t *UICommon::hold_popup = nullptr;
 lv_obj_t *UICommon::alarm_popup = nullptr;
 int UICommon::last_popup_state = -1;
@@ -81,6 +84,7 @@ static uint32_t connection_timeout_start = 0;
 static bool connection_timeout_active = false;
 static bool connection_error_shown = false;
 static bool ever_connected_successfully = false;  // Track if we've connected at least once
+static bool connection_timeout_force_error = false; // If true, ignore ever_connected_successfully for this timeout
 
 // Event handler for status bar left area click (go to Status tab)
 static void status_bar_left_click_handler(lv_event_t *e) {
@@ -237,7 +241,7 @@ void UICommon::createMainUI() {
     }
     
     // Create main screen first
-    lv_obj_t *main_screen = lv_obj_create(nullptr);
+    main_screen = lv_obj_create(nullptr);
     lv_obj_set_style_bg_color(main_screen, UITheme::BG_DARKER, LV_PART_MAIN);
     
     // Load the new screen immediately to show user something is happening
@@ -248,7 +252,7 @@ void UICommon::createMainUI() {
     if (config.connection_type == CONN_WIRELESS && strlen(config.ssid) > 0) {
         showConnectingPopup(config.name, config.ssid);
         lv_refr_now(nullptr);  // Force immediate display update
-    } else if (config.connection_type == CONN_WIRED) {
+    } else if (config.connection_type == CONN_UART) {
         showConnectingPopup(config.name, nullptr);
         lv_refr_now(nullptr);  // Force immediate display update
     }
@@ -345,6 +349,12 @@ void UICommon::createMainUI() {
     // Only reached if WiFi connected successfully (or wired connection)
     Serial.printf("UICommon: Connecting to FluidNC at %s:%d\n", 
                  config.fluidnc_url, config.websocket_port);
+    
+    // For UART connections, force error dialog on timeout to prevent stuck connecting loops
+    if (config.connection_type == CONN_UART) {
+        connection_timeout_force_error = true;
+    }
+    
     FluidNCClient::connect(config);
     
     // Start connection timeout monitoring (10 seconds)
@@ -897,6 +907,9 @@ void UICommon::hideMachineSelectConfirmDialog() {
 }
 
 void UICommon::showConnectingPopup(const char *machine_name, const char *ssid) {
+    // Wake the screen before showing a reconnect popup
+    PowerManager::onUserActivity();
+    
     // Create modal background
     connecting_popup = lv_obj_create(lv_scr_act());
     lv_obj_set_size(connecting_popup, LV_PCT(100), LV_PCT(100));
@@ -945,12 +958,19 @@ void UICommon::hideConnectingPopup() {
 
 // Event handlers for connection error dialog
 static void on_connection_error_close(lv_event_t *e) {
-    Serial.println("UICommon: Connection error dialog closed");
+    Serial.println("UICommon: Connection error dialog - Close button pressed");
     UICommon::hideConnectionErrorDialog();
 }
 
 static void on_connection_error_connect(lv_event_t *e) {
-    Serial.println("UICommon: Reconnecting WiFi and WebSocket...");
+    Serial.println("UICommon: Connection error dialog - Connect button pressed");
+    // Decide what kind of reconnect we're attempting
+    MachineConfig tmp_cfg;
+    if (MachineConfigManager::getSelectedMachine(tmp_cfg) && tmp_cfg.connection_type == CONN_UART) {
+        Serial.println("UICommon: Reconnecting to FluidNC via UART...");
+    } else {
+        Serial.println("UICommon: Reconnecting WiFi and WebSocket...");
+    }
     UICommon::hideConnectionErrorDialog();
     
     // Get machine config
@@ -965,7 +985,11 @@ static void on_connection_error_connect(lv_event_t *e) {
     lv_refr_now(nullptr);  // Force immediate display update
     
     // Disconnect existing connections
-    WiFi.disconnect();
+    // Only disconnect WiFi if we're about to reconnect over WiFi
+    if (config.connection_type == CONN_WIRELESS) {
+        WiFi.disconnect();
+    }
+    // Always ensure FluidNC client is disconnected/cleaned up
     FluidNCClient::disconnect();
     
     // Small delay to ensure clean disconnect
@@ -1015,24 +1039,35 @@ static void on_connection_error_connect(lv_event_t *e) {
                 "Could not reconnect to WiFi.\n\nCheck network settings and try again.");
         }
     }
+    else if (config.connection_type == CONN_UART) {
+        Serial.println("UICommon: Attempting UART connection to machine...");
+        // Mark that this timeout was initiated by an explicit user reconnect
+        connection_timeout_force_error = true;
+
+        // Initialize UART transport via FluidNCClient
+        bool ok = FluidNCClient::connect(config);
+        Serial.printf("UICommon: FluidNCClient::connect returned=%d\n", ok ? 1 : 0);
+        if (ok) {
+            // Start connection timeout monitoring (shorter timeout for forced UART)
+            connection_timeout_start = millis();
+            connection_timeout_active = true;
+            connection_error_shown = false;
+            Serial.println("UICommon: Wired/UART initialized, waiting for status messages...");
+        } else {
+            UICommon::hideConnectingPopup();
+            UICommon::showConnectionErrorDialog("UART Connection Failed",
+                "Could not initialize UART connection. Check wiring and settings, then try again.");
+            connection_timeout_force_error = false;
+        }
+    }
 }
 
 static void on_connection_error_restart(lv_event_t *e) {
-    Serial.println("UICommon: Restarting to change machine...");
+    Serial.println("UICommon: Connection error dialog - Restart button pressed");
+    Serial.println("UICommon: Restarting system...");
     UICommon::hideConnectionErrorDialog();
     
-    // Show restart message
-    lv_obj_t *restart_label = lv_label_create(lv_screen_active());
-    lv_label_set_text(restart_label, "Restarting...");
-    lv_obj_set_style_text_font(restart_label, &lv_font_montserrat_32, 0);
-    lv_obj_set_style_text_color(restart_label, UITheme::UI_INFO, 0);
-    lv_obj_center(restart_label);
-    
-    // Force display update
-    lv_timer_handler();
-    delay(500);
-    
-    // Restart the ESP32
+    // Force immediate restart
     ESP.restart();
 }
 
@@ -1040,26 +1075,38 @@ void UICommon::showConnectionErrorDialog(const char *title, const char *message)
     // Hide connecting popup if it's showing
     hideConnectingPopup();
     
+    // Wake the screen and restore full brightness before showing the dialog
+    PowerManager::onUserActivity();
+    
     // Stop FluidNC reconnection attempts
     FluidNCClient::stopReconnectionAttempts();
+    // Clear any forced-timeout marker (we're now showing an error)
+    connection_timeout_force_error = false;
+    // Stop timeout monitoring while the error dialog is being displayed
+    connection_timeout_active = false;
     
-    // Create modal background
-    connection_error_dialog = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(connection_error_dialog, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_bg_color(connection_error_dialog, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_bg_opa(connection_error_dialog, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(connection_error_dialog, 0, 0);
+    // Create a modal overlay on top of the current screen
+    connection_error_screen = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(connection_error_screen, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(connection_error_screen, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(connection_error_screen, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(connection_error_screen, 0, 0);
+    lv_obj_clear_flag(connection_error_screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(connection_error_screen, LV_OBJ_FLAG_CLICKABLE);  // Don't capture touch on overlay background
+    
+    // Create dialog container in the center
+    connection_error_dialog = lv_obj_create(connection_error_screen);
+    lv_obj_set_size(connection_error_dialog, 600, 300);
+    lv_obj_center(connection_error_dialog);
+    lv_obj_set_style_bg_color(connection_error_dialog, UITheme::BG_MEDIUM, 0);
+    lv_obj_set_style_border_color(connection_error_dialog, UITheme::STATE_ALARM, 0);
+    lv_obj_set_style_border_width(connection_error_dialog, 3, 0);
+    lv_obj_set_style_pad_all(connection_error_dialog, 20, 0);
     lv_obj_clear_flag(connection_error_dialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(connection_error_dialog, LV_OBJ_FLAG_CLICKABLE);  // Allow dialog to receive clicks
     
-    // Dialog content box (consistent with System Options)
-    lv_obj_t *content = lv_obj_create(connection_error_dialog);
-    lv_obj_set_size(content, 600, 300);
-    lv_obj_center(content);
-    lv_obj_set_style_bg_color(content, UITheme::BG_MEDIUM, 0);
-    lv_obj_set_style_border_color(content, UITheme::STATE_ALARM, 0);
-    lv_obj_set_style_border_width(content, 3, 0);
-    lv_obj_set_style_pad_all(content, 20, 0);
-    lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+    // Use connection_error_dialog as content parent (not screen)
+    lv_obj_t *content = connection_error_dialog;
     
     // Title (positioned near top, consistent with System Options)
     lv_obj_t *title_label = lv_label_create(content);
@@ -1080,23 +1127,14 @@ void UICommon::showConnectionErrorDialog(const char *title, const char *message)
     lv_obj_set_style_text_align(msg_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(msg_label, LV_ALIGN_TOP_MID, 0, 50);
     
-    // Button container (positioned at bottom, consistent with System Options)
-    lv_obj_t *btn_container = lv_obj_create(content);
-    lv_obj_set_size(btn_container, 560, 60);
-    lv_obj_set_style_bg_opa(btn_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(btn_container, 0, 0);
-    lv_obj_set_style_pad_all(btn_container, 0, 0);
-    lv_obj_set_style_pad_gap(btn_container, 10, 0);
-    lv_obj_set_flex_flow(btn_container, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(btn_container, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_align(btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_clear_flag(btn_container, LV_OBJ_FLAG_SCROLLABLE);
-    
     // Connect button (left)
-    lv_obj_t *connect_btn = lv_btn_create(btn_container);
+    lv_obj_t *connect_btn = lv_btn_create(content);
     lv_obj_set_size(connect_btn, 165, 50);
     lv_obj_set_style_bg_color(connect_btn, UITheme::BTN_CONNECT, 0);
+    lv_obj_add_flag(connect_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(connect_btn, on_connection_error_connect, LV_EVENT_CLICKED, nullptr);
+    lv_obj_align(connect_btn, LV_ALIGN_BOTTOM_LEFT, 20, -20);
+    Serial.println("UICommon: Connect button created and clickable");
     
     lv_obj_t *connect_label = lv_label_create(connect_btn);
     lv_label_set_text(connect_label, LV_SYMBOL_REFRESH " Connect");
@@ -1104,10 +1142,13 @@ void UICommon::showConnectionErrorDialog(const char *title, const char *message)
     lv_obj_center(connect_label);
     
     // Restart button (center)
-    lv_obj_t *restart_btn = lv_btn_create(btn_container);
+    lv_obj_t *restart_btn = lv_btn_create(content);
     lv_obj_set_size(restart_btn, 165, 50);
     lv_obj_set_style_bg_color(restart_btn, UITheme::ACCENT_PRIMARY, 0);
+    lv_obj_add_flag(restart_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(restart_btn, on_connection_error_restart, LV_EVENT_CLICKED, nullptr);
+    lv_obj_align(restart_btn, LV_ALIGN_BOTTOM_MID, 0, -20);
+    Serial.println("UICommon: Restart button created and clickable");
     
     lv_obj_t *restart_label = lv_label_create(restart_btn);
     lv_label_set_text(restart_label, LV_SYMBOL_POWER " Restart");
@@ -1115,25 +1156,39 @@ void UICommon::showConnectionErrorDialog(const char *title, const char *message)
     lv_obj_center(restart_label);
     
     // Close button (right)
-    lv_obj_t *close_btn = lv_btn_create(btn_container);
+    lv_obj_t *close_btn = lv_btn_create(content);
     lv_obj_set_size(close_btn, 165, 50);
     lv_obj_set_style_bg_color(close_btn, UITheme::BG_BUTTON, 0);
+    lv_obj_add_flag(close_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(close_btn, on_connection_error_close, LV_EVENT_CLICKED, nullptr);
+    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_RIGHT, -20, -20);
+    Serial.println("UICommon: Close button created and clickable");
     
     lv_obj_t *close_label = lv_label_create(close_btn);
     lv_label_set_text(close_label, "Close");
     lv_obj_set_style_text_font(close_label, &lv_font_montserrat_18, 0);
     lv_obj_center(close_label);
     
+    // Force immediate display update
+    lv_refr_now(nullptr);
+    
     Serial.printf("UICommon: Connection error dialog shown - %s: %s\n", title, message);
+    Serial.println("UICommon: Error overlay shown, buttons created as dialog children");
+    
+    // Mark dialog as active
+    connection_error_dialog_active = true;
 }
 
 void UICommon::hideConnectionErrorDialog() {
-    if (connection_error_dialog) {
-        lv_obj_del(connection_error_dialog);
-        connection_error_dialog = nullptr;
+    if (connection_error_screen) {
+        lv_obj_del(connection_error_screen);
+        connection_error_screen = nullptr;
         Serial.println("UICommon: Connection error dialog hidden");
     }
+    // Reset error shown flag so next timeout can show error dialog
+    connection_error_shown = false;
+    // Mark dialog as inactive
+    connection_error_dialog_active = false;
 }
 
 void UICommon::checkConnectionTimeout() {
@@ -1152,9 +1207,14 @@ void UICommon::checkConnectionTimeout() {
         return;
     }
     
-    // Check if timeout exceeded (10 seconds)
+    // Check if timeout exceeded (default 10 seconds)
     uint32_t elapsed = millis() - connection_timeout_start;
-    if (elapsed >= 10000 && !connection_error_shown && !ever_connected_successfully) {
+    uint32_t threshold_ms = connection_timeout_force_error ? 10000 : 10000; // 10 seconds for all connections to ensure reliable timeout
+    // Debug: log timeout state for investigations
+    Serial.printf("UICommon: checkConnectionTimeout elapsed=%lums threshold=%lums ever_connected=%d force=%d active=%d shown=%d\n",
+                  (unsigned long)elapsed, (unsigned long)threshold_ms, ever_connected_successfully ? 1 : 0,
+                  connection_timeout_force_error ? 1 : 0, connection_timeout_active ? 1 : 0, connection_error_shown ? 1 : 0);
+    if (elapsed >= threshold_ms && !connection_error_shown && (!ever_connected_successfully || connection_timeout_force_error)) {
         // Only show error if we've never connected successfully (prevents popup on brief disconnects after initial connection)
         connection_error_shown = true;
         
@@ -1171,6 +1231,8 @@ void UICommon::checkConnectionTimeout() {
             showConnectionErrorDialog("Machine Connection Failed", error_msg);
             
             Serial.println("UICommon: Machine connection timeout - showing error dialog");
+            // Clear forced timeout flag after showing dialog
+            connection_timeout_force_error = false;
         }
     }
 }
@@ -1186,6 +1248,7 @@ void UICommon::showHoldPopup(const char *message) {
     lv_obj_set_style_bg_opa(hold_popup, LV_OPA_50, 0);
     lv_obj_set_style_border_width(hold_popup, 0, 0);
     lv_obj_clear_flag(hold_popup, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(hold_popup, LV_OBJ_FLAG_CLICKABLE);  // Allow touch events to pass through to dialog content
     lv_obj_center(hold_popup);
     
     // Create dialog box
@@ -1273,6 +1336,7 @@ void UICommon::showAlarmPopup(const char *message) {
     lv_obj_set_style_bg_opa(alarm_popup, LV_OPA_50, 0);
     lv_obj_set_style_border_width(alarm_popup, 0, 0);
     lv_obj_clear_flag(alarm_popup, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(alarm_popup, LV_OBJ_FLAG_CLICKABLE);  // Allow touch events to pass through to dialog content
     lv_obj_center(alarm_popup);
     
     // Create dialog box

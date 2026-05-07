@@ -141,8 +141,8 @@ LGFX::LGFX(void) {
         cfg.i2c_addr   = 0x5D;
         cfg.pin_sda    = TOUCH_SDA;  // GPIO 19
         cfg.pin_scl    = TOUCH_SCL;  // GPIO 20
-        cfg.pin_rst    = TOUCH_RST;  // GPIO 38 - Required for proper GT911 reset
-        cfg.freq       = 100000;     // 100kHz for better compatibility (was 400kHz)
+        cfg.pin_rst    = TOUCH_RST;  // GPIO 38 - Reset already performed in DisplayDriver::init()
+        cfg.freq       = 200000;     // 200kHz - balance between speed and reliability
 #endif
 
         _touch_instance.config(cfg);
@@ -156,6 +156,13 @@ DisplayDriver::DisplayDriver() : disp(nullptr), disp_draw_buf(nullptr), disp_dra
 
 // Initialize display
 bool DisplayDriver::init() {
+    Serial.println("DisplayDriver: init() starting...");
+#ifdef HARDWARE_BASIC
+    Serial.println("DisplayDriver: Compiled for HARDWARE_BASIC (CrowPanel 7\" Basic)");
+#else
+    Serial.println("DisplayDriver: Compiled for HARDWARE_ADVANCE (CrowPanel 7\" Advance)");
+#endif
+    
     // Initialize I2C bus first (shared by backlight and touch on Advance)
     // Touch driver will call Wire.begin() again but that's safe if already initialized
     
@@ -180,7 +187,19 @@ bool DisplayDriver::init() {
     #error "No backlight type defined! Use -DBACKLIGHT_PWM or -DBACKLIGHT_I2C"
 #endif
     
+#ifdef HARDWARE_BASIC
+    // Basic hardware: Perform GT911 reset sequence BEFORE lcd.init()
+    Serial.println("DisplayDriver: Performing GT911 reset sequence for Basic hardware...");
+    pinMode(TOUCH_RST, OUTPUT);
+    digitalWrite(TOUCH_RST, LOW);
+    delay(10);
+    digitalWrite(TOUCH_RST, HIGH);
+    delay(50);  // Wait for GT911 to initialize
+    Serial.println("DisplayDriver: GT911 reset sequence completed");
+#endif
+    
     // Initialize LovyanGFX (this will initialize I2C for touch panel)
+    Serial.println("DisplayDriver: Calling lcd.init()...");
     lcd.init();
     lcd.setColorDepth(16);
     lcd.setBrightness(255);

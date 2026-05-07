@@ -20,6 +20,7 @@ lv_obj_t *UITabFiles::upload_dialog = nullptr;
 lv_obj_t *UITabFiles::upload_progress_dialog = nullptr;
 lv_obj_t *UITabFiles::upload_progress_bar = nullptr;
 lv_obj_t *UITabFiles::upload_progress_label = nullptr;
+lv_obj_t *UITabFiles::upload_dest_dropdown = nullptr;
 std::vector<std::string> UITabFiles::file_names;
 std::string UITabFiles::current_path = "/sd/";  // Default to SD card root
 bool UITabFiles::initial_load_done = false;     // Track initial load
@@ -1146,6 +1147,8 @@ void UITabFiles::showUploadDialog(const char* filename, const char* fullPath, si
         lv_obj_delete(upload_dialog);
     }
     
+    upload_dest_dropdown = nullptr; // Reset dropdown reference
+    
     // Create modal background
     upload_dialog = lv_obj_create(lv_scr_act());
     lv_obj_set_size(upload_dialog, LV_PCT(100), LV_PCT(100));
@@ -1195,14 +1198,19 @@ void UITabFiles::showUploadDialog(const char* filename, const char* fullPath, si
     lv_obj_set_style_text_color(lbl_size, UITheme::TEXT_LIGHT, 0);
     lv_obj_align(lbl_size, LV_ALIGN_TOP_LEFT, 0, 80);
     
-    // Destination
+    // Destination selection dropdown
+    upload_dest_dropdown = lv_dropdown_create(content);
+    lv_dropdown_set_options(upload_dest_dropdown, "FluidNC SD Card\nFluidNC Local Filesystem");
+    lv_dropdown_set_selected(upload_dest_dropdown, 0); // Default to SD Card
+    lv_obj_set_size(upload_dest_dropdown, 300, 40);
+    lv_obj_align(upload_dest_dropdown, LV_ALIGN_TOP_LEFT, 0, 115);
+    
+    // Destination label
     lv_obj_t *lbl_dest = lv_label_create(content);
-    lv_label_set_text_fmt(lbl_dest, "Destination: /sd%s%s", FLUIDNC_UPLOAD_PATH, filename);
+    lv_label_set_text(lbl_dest, "Destination:");
     lv_obj_set_style_text_font(lbl_dest, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(lbl_dest, UITheme::TEXT_LIGHT, 0);
-    lv_label_set_long_mode(lbl_dest, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(lbl_dest, 550);
-    lv_obj_align(lbl_dest, LV_ALIGN_TOP_LEFT, 0, 115);
+    lv_obj_align(lbl_dest, LV_ALIGN_TOP_LEFT, 0, 95);
     
     // Button container (positioned at bottom)
     lv_obj_t *btn_container = lv_obj_create(content);
@@ -1229,51 +1237,83 @@ void UITabFiles::showUploadDialog(const char* filename, const char* fullPath, si
     upload_fullpath[sizeof(upload_fullpath) - 1] = '\0';
     
     lv_obj_add_event_cb(btn_upload, [](lv_event_t *e) {
-        const char* fname = (const char*)lv_event_get_user_data(e);
+        // Read destination selection BEFORE closing dialog
+        uint16_t selected_dest = lv_dropdown_get_selected(upload_dest_dropdown);
+        const char* destPath = (selected_dest == 0) ? "/sd/" : "/localfs/";
         
-        Serial.printf("[UITabFiles] Upload button clicked for: %s\n", fname);
+        Serial.printf("[UITabFiles] Upload button clicked for: %s to %s\n", upload_filename, destPath);
         
-        // Copy filename and full path to heap for timer
-        char* fname_copy = (char*)malloc(128);
-        char* fullpath_copy = (char*)malloc(256);
-        strncpy(fname_copy, upload_filename, 127);
-        fname_copy[127] = '\0';
-        strncpy(fullpath_copy, upload_fullpath, 255);
-        fullpath_copy[255] = '\0';
-        
-        // Close confirmation dialog first
-        if (upload_dialog) {
-            lv_obj_delete(upload_dialog);
-            upload_dialog = nullptr;
+        struct UploadTimerData {
+            char* fullpath;
+            char* destpath;
+            lv_obj_t* dialog;
+        };
+        UploadTimerData* timer_data = (UploadTimerData*)malloc(sizeof(UploadTimerData));
+        if (!timer_data) {
+            Serial.println("[UITabFiles] ERROR: failed to allocate timer data");
+            return;
         }
+        timer_data->fullpath = (char*)malloc(256);
+        timer_data->destpath = (char*)malloc(16);
+        timer_data->dialog = upload_dialog;
+        if (!timer_data->fullpath || !timer_data->destpath) {
+            Serial.println("[UITabFiles] ERROR: failed to allocate timer strings");
+            free(timer_data->fullpath);
+            free(timer_data->destpath);
+            free(timer_data);
+            return;
+        }
+        strncpy(timer_data->fullpath, upload_fullpath, 255);
+        timer_data->fullpath[255] = '\0';
+        strncpy(timer_data->destpath, destPath, 15);
+        timer_data->destpath[15] = '\0';
         
-        // Give LVGL time to process the deletion before creating new dialog
+        // Clear dialog pointers immediately, but defer actual deletion until after event processing has completed
+        upload_dialog = nullptr;
+        upload_dest_dropdown = nullptr;
+        
         lv_timer_create([](lv_timer_t *timer) {
-            char* fullpath_copy = (char*)lv_timer_get_user_data(timer);
+            struct UploadTimerData {
+                char* fullpath;
+                char* destpath;
+                lv_obj_t* dialog;
+            };
+            UploadTimerData* data = (UploadTimerData*)lv_timer_get_user_data(timer);
+            if (!data) {
+                Serial.println("[UITabFiles] ERROR: timer user data is null");
+                lv_timer_delete(timer);
+                return;
+            }
             
-            // Extract filename from stored copies
-            size_t lastSlash = std::string(fullpath_copy).find_last_of('/');
-            const char* fname = (lastSlash != std::string::npos) ? fullpath_copy + lastSlash + 1 : fullpath_copy;
+            // Delete the dialog after the event has finished
+            if (data->dialog) {
+                lv_obj_del(data->dialog);
+            }
             
-            Serial.printf("[UITabFiles] Timer callback executing for: %s\n", fname);
+            const char* fname = strrchr(data->fullpath, '/');
+            if (fname) {
+                fname++;
+            } else {
+                fname = data->fullpath;
+            }
             
-            // Show progress dialog
+            Serial.printf("[UITabFiles] Timer callback executing for: %s to %s\n", fname, data->destpath);
+            
             showUploadProgress(fname);
-            
-            // Use the stored full path directly
             UploadManager::uploadFile(
-                fullpath_copy,
+                data->fullpath,
                 fname,
+                data->destpath,
                 updateUploadProgress,
                 closeUploadProgress
             );
             
-            free(fullpath_copy);
+            free(data->fullpath);
+            free(data->destpath);
+            free(data);
             lv_timer_delete(timer);
-        }, 50, fullpath_copy);
-        
-        free(fname_copy);
-    }, LV_EVENT_CLICKED, upload_filename);
+        }, 1, timer_data);
+    }, LV_EVENT_CLICKED, nullptr);
     
     lv_obj_t *lbl_upload = lv_label_create(btn_upload);
     lv_label_set_text(lbl_upload, "Upload");

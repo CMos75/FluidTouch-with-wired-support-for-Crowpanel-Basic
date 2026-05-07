@@ -45,6 +45,7 @@ bool UploadManager::init() {
 
 bool UploadManager::uploadFile(const char* localPath, 
                                const char* filename,
+                               const char* destPath,
                                ProgressCallback onProgress,
                                CompleteCallback onComplete) {
     if (_uploading) {
@@ -123,7 +124,7 @@ bool UploadManager::uploadFile(const char* localPath,
     }
     
     // FluidNC expects path as directory only, filename goes in form field name
-    String destDir = String(FLUIDNC_UPLOAD_PATH);
+    String destDir = String(destPath);
     String fullPath = destDir + filenameStr;
     
     // Get current timestamp
@@ -226,6 +227,9 @@ bool UploadManager::uploadFile(const char* localPath,
             Serial.printf("[UploadManager] Progress: %d%% (%d/%d bytes)\n", currentPercent, bytesUploaded, fileSize);
         }
         
+        // Keep UI responsive during upload
+        lv_timer_handler();
+        
         // Small delay for network and watchdog
         delay(1);
     }
@@ -248,15 +252,22 @@ bool UploadManager::uploadFile(const char* localPath,
                 success = false;
                 break;
             }
+            // Keep UI responsive while waiting
+            lv_timer_handler();
             delay(10);
         }
         
         if (success) {
-            String response = client.readStringUntil('\n');
-            Serial.printf("[UploadManager] Response: %s\n", response.c_str());
+            String response = client.readString();
+            Serial.printf("[UploadManager] Full response: %s\n", response.c_str());
             
-            if (response.indexOf("200") >= 0) httpCode = 200;
-            else if (response.indexOf("201") >= 0) httpCode = 201;
+            // Check first line for status code
+            int firstLineEnd = response.indexOf('\n');
+            String firstLine = (firstLineEnd >= 0) ? response.substring(0, firstLineEnd) : response;
+            Serial.printf("[UploadManager] First line: %s\n", firstLine.c_str());
+            
+            if (firstLine.indexOf("200") >= 0) httpCode = 200;
+            else if (firstLine.indexOf("201") >= 0) httpCode = 201;
             else {
                 Serial.println("[UploadManager] Upload failed - bad response");
                 success = false;

@@ -110,6 +110,8 @@ public:
     
     // Main loop - call regularly to handle WebSocket events
     static void loop();
+
+    // Main loop will handle either WebSocket or UART transport depending on MachineConfig
     
     // Get current status
     static const FluidNCStatus& getStatus();
@@ -134,6 +136,9 @@ public:
     
     // Clear terminal callback
     static void clearTerminalCallback();
+
+    // Testing helper: expose internal incoming handler for unit tests/harness
+    static void test_handleIncoming(const char* message);
     
 private:
     static websockets::WebsocketsClient webSocket;
@@ -143,6 +148,11 @@ private:
     static bool initialized;
     static FluidNCMessageCallback messageCallback;  // Optional callback for raw messages
     static FluidNCMessageCallback terminalCallback; // Optional callback for terminal display
+
+    // UART transport support
+    static HardwareSerial* uartSerial; // Pointer to selected UART (Serial1/Serial2)
+    static bool usingSerial;           // True when using UART transport
+    static void handleIncoming(const char* message); // Shared handler for incoming messages
     
     // Auto-reporting and fallback polling
     static bool autoReportingEnabled;     // True if auto-reporting is active

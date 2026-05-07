@@ -12,6 +12,7 @@ public:
     static bool init();
     static bool uploadFile(const char* localPath, 
                           const char* filename,
+                          const char* destPath,
                           ProgressCallback onProgress,
                           CompleteCallback onComplete);
     static bool isUploading();

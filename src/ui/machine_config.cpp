@@ -34,6 +34,11 @@ void MachineConfigManager::loadMachines(MachineConfig machines[MAX_MACHINES]) {
             prefs.getString((prefix + "pwd").c_str(), machines[i].password, sizeof(machines[i].password));
             prefs.getString((prefix + "url").c_str(), machines[i].fluidnc_url, sizeof(machines[i].fluidnc_url));
             machines[i].websocket_port = prefs.getUShort((prefix + "port").c_str(), 81);
+            // Load UART settings (if present)
+            machines[i].uart_baud = prefs.getInt((prefix + "uart_baud").c_str(), machines[i].uart_baud);
+            machines[i].uart_rx_pin = prefs.getInt((prefix + "uart_rx").c_str(), machines[i].uart_rx_pin);
+            machines[i].uart_tx_pin = prefs.getInt((prefix + "uart_tx").c_str(), machines[i].uart_tx_pin);
+            machines[i].uart_port = (uint8_t)prefs.getInt((prefix + "uart_port").c_str(), machines[i].uart_port);
             
             Serial.printf("    Name: %s, URL: %s:%d\n", machines[i].name, machines[i].fluidnc_url, machines[i].websocket_port);
             
@@ -82,6 +87,11 @@ void MachineConfigManager::saveMachines(const MachineConfig machines[MAX_MACHINE
             prefs.putString((prefix + "pwd").c_str(), machines[i].password);
             prefs.putString((prefix + "url").c_str(), machines[i].fluidnc_url);
             prefs.putUShort((prefix + "port").c_str(), machines[i].websocket_port);
+            // Save UART settings
+            prefs.putInt((prefix + "uart_baud").c_str(), machines[i].uart_baud);
+            prefs.putInt((prefix + "uart_rx").c_str(), machines[i].uart_rx_pin);
+            prefs.putInt((prefix + "uart_tx").c_str(), machines[i].uart_tx_pin);
+            prefs.putInt((prefix + "uart_port").c_str(), machines[i].uart_port);
             
             // Save jog settings
             prefs.putFloat((prefix + "jxy_st").c_str(), machines[i].jog_xy_step);

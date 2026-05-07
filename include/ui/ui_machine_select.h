@@ -8,6 +8,7 @@ class UIMachineSelect {
 public:
     static void show(lv_display_t *disp);
     static void hide();
+    static void hideKeyboard();
     
 private:
     static lv_obj_t *screen;
@@ -30,6 +31,7 @@ private:
     // Configuration dialog
     static lv_obj_t *config_dialog;
     static lv_obj_t *dialog_content;
+    static lv_obj_t *fields_scroll; // Scrollable area for dialog fields
     static lv_obj_t *keyboard;
     static int editing_index;
     static lv_obj_t *ta_name;
@@ -38,6 +40,10 @@ private:
     static lv_obj_t *ta_url;
     static lv_obj_t *ta_port;
     static lv_obj_t *dd_connection_type;
+    static lv_obj_t *ta_uart_baud;
+    static lv_obj_t *dd_uart_port;
+    static lv_obj_t *ta_uart_rx_pin;
+    static lv_obj_t *ta_uart_tx_pin;
     
     // Delete confirmation dialog
     static lv_obj_t *delete_dialog;
@@ -66,7 +72,6 @@ private:
     static void hideDeleteConfirmDialog();
     static void updateConnectionFields();
     static void showKeyboard(lv_obj_t *ta);
-    static void hideKeyboard();
     static int getConfiguredMachineCount();
     static void swapMachines(int index1, int index2);
 };
